@@ -7,15 +7,19 @@
 // - includes are hoisted to the top and deduplicated
 // - comments and empty lines are stripped
 // - NORETURN/PRINTF/debug are removed
-// - exitf/failf/fail are replaced with exit
+// - exitf/fail are replaced with exit
 // - uintN types are replaced with uintN_t
-// - [[FOO]] placeholders are replaced by actual values
+// - /*FOO*/ placeholders are replaced by actual values
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 
+#if GOOS_freebsd || GOOS_test && HOSTGOOS_freebsd
+#include <sys/endian.h> // for htobe*.
+#else
 #include <endian.h> // for htobe*.
+#endif
 #include <stdint.h>
 #include <stdio.h> // for fmt arguments
 #include <stdlib.h>
@@ -35,8 +39,9 @@ NORETURN void doexit(int status)
 }
 #endif
 
-#if SYZ_EXECUTOR || SYZ_PROCS || SYZ_REPEAT && SYZ_ENABLE_CGROUPS || \
-    __NR_syz_mount_image || __NR_syz_read_part_table
+#if SYZ_EXECUTOR || SYZ_PROCS || SYZ_REPEAT && SYZ_ENABLE_CGROUPS ||         \
+    SYZ_ENABLE_NETDEV || __NR_syz_mount_image || __NR_syz_read_part_table || \
+    __NR_syz_usb_connect || (GOOS_openbsd || GOOS_freebsd) && SYZ_TUN_ENABLE
 unsigned long long procid;
 #endif
 
@@ -55,7 +60,7 @@ static __thread jmp_buf segv_env;
 
 #if GOOS_akaros
 #include <parlib/parlib.h>
-static void recover()
+static void recover(void)
 {
 	_longjmp(segv_env, 1);
 }
@@ -86,7 +91,7 @@ static void segv_handler(int sig, siginfo_t* info, void* ctx)
 	doexit(sig);
 }
 
-static void install_segv_handler()
+static void install_segv_handler(void)
 {
 	struct sigaction sa;
 #if GOOS_linux
@@ -132,7 +137,8 @@ static void kill_and_wait(int pid, int* status)
 #endif
 
 #if !GOOS_windows
-#if SYZ_EXECUTOR || SYZ_THREADED || SYZ_REPEAT && SYZ_EXECUTOR_USES_FORK_SERVER
+#if SYZ_EXECUTOR || SYZ_THREADED || SYZ_REPEAT && SYZ_EXECUTOR_USES_FORK_SERVER || \
+    __NR_syz_usb_connect
 static void sleep_ms(uint64 ms)
 {
 	usleep(ms * 1000);
@@ -142,7 +148,7 @@ static void sleep_ms(uint64 ms)
 #if SYZ_EXECUTOR || SYZ_THREADED || SYZ_REPEAT && SYZ_EXECUTOR_USES_FORK_SERVER
 #include <time.h>
 
-static uint64 current_time_ms()
+static uint64 current_time_ms(void)
 {
 	struct timespec ts;
 	if (clock_gettime(CLOCK_MONOTONIC, &ts))
@@ -151,14 +157,18 @@ static uint64 current_time_ms()
 }
 #endif
 
-#if SYZ_EXECUTOR || SYZ_USE_TMP_DIR
+#if SYZ_EXECUTOR || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP || SYZ_USE_TMP_DIR
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-static void use_temporary_dir()
+static void use_temporary_dir(void)
 {
+#if SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
+	char tmpdir_template[] = "/data/data/syzkaller/syzkaller.XXXXXX";
+#else
 	char tmpdir_template[] = "./syzkaller.XXXXXX";
+#endif
 	char* tmpdir = mkdtemp(tmpdir_template);
 	if (!tmpdir)
 		fail("failed to mkdtemp");
@@ -170,7 +180,7 @@ static void use_temporary_dir()
 #endif
 #endif
 
-#if GOOS_akaros || GOOS_netbsd || GOOS_freebsd || GOOS_test
+#if GOOS_akaros || GOOS_netbsd || GOOS_freebsd || GOOS_openbsd || GOOS_test
 #if SYZ_EXECUTOR || SYZ_EXECUTOR_USES_FORK_SERVER && SYZ_REPEAT && SYZ_USE_TMP_DIR
 #include <dirent.h>
 #include <stdio.h>
@@ -214,6 +224,7 @@ static int inject_fault(int nth)
 	return 0;
 }
 #endif
+
 #if SYZ_EXECUTOR
 static int fault_injected(int fail_fd)
 {
@@ -224,6 +235,7 @@ static int fault_injected(int fail_fd)
 
 #if !GOOS_windows
 #if SYZ_EXECUTOR || SYZ_THREADED
+#include <errno.h>
 #include <pthread.h>
 
 static void thread_start(void* (*fn)(void*), void* arg)
@@ -232,15 +244,28 @@ static void thread_start(void* (*fn)(void*), void* arg)
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, 128 << 10);
-	if (pthread_create(&th, &attr, fn, arg))
-		exitf("pthread_create failed");
-	pthread_attr_destroy(&attr);
+	int i;
+	// Clone can fail spuriously with EAGAIN if there is a concurrent execve in progress.
+	// (see linux kernel commit 498052bba55ec). But it can also be a true limit imposed by cgroups.
+	// In one case we want to retry infinitely, in another -- fail immidiately...
+	for (i = 0; i < 100; i++) {
+		if (pthread_create(&th, &attr, fn, arg) == 0) {
+			pthread_attr_destroy(&attr);
+			return;
+		}
+		if (errno == EAGAIN) {
+			usleep(50);
+			continue;
+		}
+		break;
+	}
+	exitf("pthread_create failed");
 }
 
 #endif
 #endif
 
-#if GOOS_freebsd || GOOS_netbsd || GOOS_akaros || GOOS_test
+#if GOOS_freebsd || GOOS_netbsd || GOOS_openbsd || GOOS_akaros || GOOS_test
 #if SYZ_EXECUTOR || SYZ_THREADED
 
 #include <pthread.h>
@@ -317,19 +342,10 @@ static int event_timedwait(event_t* ev, uint64 timeout)
 #endif
 
 #if SYZ_EXECUTOR || SYZ_USE_BITMASKS
-#define BITMASK_LEN(type, bf_len) (type)((1ull << (bf_len)) - 1)
-
-#define BITMASK_LEN_OFF(type, bf_off, bf_len) (type)(BITMASK_LEN(type, (bf_len)) << (bf_off))
-
-#define STORE_BY_BITMASK(type, addr, val, bf_off, bf_len)                         \
-	if ((bf_off) == 0 && (bf_len) == 0) {                                     \
-		*(type*)(addr) = (type)(val);                                     \
-	} else {                                                                  \
-		type new_val = *(type*)(addr);                                    \
-		new_val &= ~BITMASK_LEN_OFF(type, (bf_off), (bf_len));            \
-		new_val |= ((type)(val)&BITMASK_LEN(type, (bf_len))) << (bf_off); \
-		*(type*)(addr) = new_val;                                         \
-	}
+#define BITMASK(bf_off, bf_len) (((1ull << (bf_len)) - 1) << (bf_off))
+#define STORE_BY_BITMASK(type, htobe, addr, val, bf_off, bf_len)                        \
+	*(type*)(addr) = htobe((htobe(*(type*)(addr)) & ~BITMASK((bf_off), (bf_len))) | \
+			       (((type)(val) << (bf_off)) & BITMASK((bf_off), (bf_len))))
 #endif
 
 #if SYZ_EXECUTOR || SYZ_USE_CHECKSUMS
@@ -366,7 +382,7 @@ static uint16 csum_inet_digest(struct csum_inet* csum)
 
 #if GOOS_akaros
 #include "common_akaros.h"
-#elif GOOS_freebsd || GOOS_netbsd
+#elif GOOS_freebsd || GOOS_netbsd || GOOS_openbsd
 #include "common_bsd.h"
 #elif GOOS_fuchsia
 #include "common_fuchsia.h"
@@ -376,10 +392,29 @@ static uint16 csum_inet_digest(struct csum_inet* csum)
 #include "common_test.h"
 #elif GOOS_windows
 #include "common_windows.h"
-#elif GOOS_test
-#include "common_test.h"
 #else
 #error "unknown OS"
+#endif
+
+#if SYZ_EXECUTOR || __NR_syz_execute_func
+// syz_execute_func(text ptr[in, text[taget]])
+static long syz_execute_func(volatile long text)
+{
+	// Here we just to random code which is inherently unsafe.
+	// But we only care about coverage in the output region.
+	// The following code tries to remove left-over pointers in registers
+	// from the reach of the random code, otherwise it's known to reach
+	// the output region somehow. The asm block is arch-independent except
+	// for the number of available registers.
+	volatile long p[8] = {0};
+	(void)p;
+#if GOARCH_amd64
+	asm volatile("" ::"r"(0l), "r"(1l), "r"(2l), "r"(3l), "r"(4l), "r"(5l), "r"(6l),
+		     "r"(7l), "r"(8l), "r"(9l), "r"(10l), "r"(11l), "r"(12l), "r"(13l));
+#endif
+	NONFAILING(((void (*)(void))(text))());
+	return 0;
+}
 #endif
 
 #if SYZ_THREADED
@@ -406,9 +441,9 @@ static void* thr(void* arg)
 }
 
 #if SYZ_REPEAT
-static void execute_one()
+static void execute_one(void)
 #else
-static void loop()
+static void loop(void)
 #endif
 {
 #if SYZ_REPRO
@@ -416,15 +451,15 @@ static void loop()
 	}
 #endif
 #if SYZ_TRACE
-	printf("### start\n");
+	fprintf(stderr, "### start\n");
 #endif
 	int i, call, thread;
 #if SYZ_COLLIDE
 	int collide = 0;
 again:
 #endif
-	for (call = 0; call < [[NUM_CALLS]]; call++) {
-		for (thread = 0; thread < sizeof(threads) / sizeof(threads[0]); thread++) {
+	for (call = 0; call < /*NUM_CALLS*/; call++) {
+		for (thread = 0; thread < (int)(sizeof(threads) / sizeof(threads[0])); thread++) {
 			struct thread_t* th = &threads[thread];
 			if (!th->created) {
 				th->created = 1;
@@ -449,6 +484,9 @@ again:
 	}
 	for (i = 0; i < 100 && __atomic_load_n(&running, __ATOMIC_RELAXED); i++)
 		sleep_ms(1);
+#if SYZ_HAVE_CLOSE_FDS
+	close_fds();
+#endif
 #if SYZ_COLLIDE
 	if (!collide) {
 		collide = 1;
@@ -459,7 +497,7 @@ again:
 #endif
 
 #if SYZ_EXECUTOR || SYZ_REPEAT
-static void execute_one();
+static void execute_one(void);
 #if SYZ_EXECUTOR_USES_FORK_SERVER
 #include <signal.h>
 #include <sys/types.h>
@@ -475,7 +513,7 @@ static void execute_one();
 static void reply_handshake();
 #endif
 
-static void loop()
+static void loop(void)
 {
 #if SYZ_HAVE_SETUP_LOOP
 	setup_loop();
@@ -493,7 +531,7 @@ static void loop()
 #endif
 	int iter;
 #if SYZ_REPEAT_TIMES
-	for (iter = 0; iter < [[REPEAT_TIMES]]; iter++) {
+	for (iter = 0; iter < /*REPEAT_TIMES*/; iter++) {
 #else
 	for (iter = 0;; iter++) {
 #endif
@@ -537,9 +575,8 @@ static void loop()
 			close(kOutPipeFd);
 #endif
 			execute_one();
-			debug("worker exiting\n");
-#if SYZ_HAVE_RESET_TEST
-			reset_test();
+#if SYZ_HAVE_CLOSE_FDS && !SYZ_THREADED
+			close_fds();
 #endif
 			doexit(0);
 #endif
@@ -587,16 +624,15 @@ static void loop()
 			if (current_time_ms() - start < 5 * 1000)
 				continue;
 #endif
-			debug("killing\n");
+			debug("killing hanging pid %d\n", pid);
 			kill_and_wait(pid, &status);
 			break;
 		}
 #if SYZ_EXECUTOR
-		status = WEXITSTATUS(status);
-		if (status == kFailStatus)
+		if (WEXITSTATUS(status) == kFailStatus) {
+			errno = 0;
 			fail("child failed");
-		if (status == kErrorStatus)
-			error("child errored");
+		}
 		reply_execute(0);
 #endif
 #if SYZ_EXECUTOR || SYZ_USE_TMP_DIR
@@ -605,30 +641,31 @@ static void loop()
 	}
 }
 #else
-static void loop()
+static void loop(void)
 {
 	execute_one();
 }
 #endif
 #endif
 
-// clang-format off
-// clang-format badly mishandles this part, moreover different versions mishandle it differently.
 #if !SYZ_EXECUTOR
-[[SYSCALL_DEFINES]]
+/*SYSCALL_DEFINES*/
 
-[[RESULTS]]
+/*RESULTS*/
 
-#if SYZ_THREADED || SYZ_REPEAT || SYZ_SANDBOX_NONE || SYZ_SANDBOX_SETUID || SYZ_SANDBOX_NAMESPACE
+#if SYZ_THREADED || SYZ_REPEAT || SYZ_SANDBOX_NONE || SYZ_SANDBOX_SETUID || SYZ_SANDBOX_NAMESPACE || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
 #if SYZ_THREADED
 void execute_call(int call)
 #elif SYZ_REPEAT
-void execute_one()
+void execute_one(void)
 #else
-void loop()
+void loop(void)
 #endif
 {
-	[[SYSCALLS]]
+	/*SYSCALLS*/
+#if SYZ_HAVE_CLOSE_FDS && !SYZ_THREADED && !SYZ_REPEAT
+	close_fds();
+#endif
 }
 #endif
 
@@ -638,29 +675,32 @@ void loop()
 
 int main(int argc, char** argv)
 {
-	[[MMAP_DATA]]
+	/*MMAP_DATA*/
 
 	program_name = argv[0];
 	if (argc == 2 && strcmp(argv[1], "child") == 0)
 		child();
 #else
-int main()
+int main(void)
 {
-	[[MMAP_DATA]]
+	/*MMAP_DATA*/
 #endif
-		// clang-format on
 
 #if SYZ_HANDLE_SEGV
 	install_segv_handler();
 #endif
 #if SYZ_PROCS
-	for (procid = 0; procid < [[PROCS]]; procid++) {
+	for (procid = 0; procid < /*PROCS*/; procid++) {
 		if (fork() == 0) {
 #endif
-#if SYZ_USE_TMP_DIR
+#if SYZ_USE_TMP_DIR || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
 			use_temporary_dir();
 #endif
-			[[SANDBOX_FUNC]]
+			/*SANDBOX_FUNC*/
+#if SYZ_HAVE_CLOSE_FDS && !SYZ_THREADED && !SYZ_REPEAT && !SYZ_SANDBOX_NONE && \
+    !SYZ_SANDBOX_SETUID && !SYZ_SANDBOX_NAMESPACE && !SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
+			close_fds();
+#endif
 #if SYZ_PROCS
 		}
 	}

@@ -6,11 +6,13 @@
 package compiler
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/syzkaller/pkg/ast"
 	"github.com/google/syzkaller/prog"
+	"github.com/google/syzkaller/sys/targets"
 )
 
 func (comp *compiler) typecheck() {
@@ -283,18 +285,20 @@ func (comp *compiler) checkAttributeValues() {
 }
 
 func (comp *compiler) checkLenTargets() {
+	warned := make(map[string]bool)
 	for _, decl := range comp.desc.Nodes {
 		switch n := decl.(type) {
 		case *ast.Call:
 			for _, arg := range n.Args {
-				comp.checkLenType(arg.Type, arg.Name.Name, n.Args, nil, make(map[string]bool), true)
+				checked := make(map[string]bool)
+				comp.checkLenType(arg.Type, arg.Name.Name, n.Args, nil, checked, warned, true)
 			}
 		}
 	}
 }
 
 func (comp *compiler) checkLenType(t *ast.Type, name string, fields []*ast.Field,
-	parents []*ast.Struct, checked map[string]bool, isArg bool) {
+	parents []string, checked, warned map[string]bool, isArg bool) {
 	desc := comp.getTypeDesc(t)
 	if desc == typeStruct {
 		s := comp.structs[t.Ident]
@@ -303,27 +307,34 @@ func (comp *compiler) checkLenType(t *ast.Type, name string, fields []*ast.Field
 			return
 		}
 		checked[s.Name.Name] = true
-		parents = append(parents, s)
+		parentName := s.Name.Name
+		if pos := strings.IndexByte(parentName, '['); pos != -1 {
+			// For template parents name is "struct_name[ARG1, ARG2]", strip the part after '['.
+			parentName = parentName[:pos]
+		}
+		parents = append(parents, parentName)
 		if !s.IsUnion {
 			fields = s.Fields
 		}
 		for _, fld := range s.Fields {
-			comp.checkLenType(fld.Type, fld.Name.Name, fields, parents, checked, false)
+			comp.checkLenType(fld.Type, fld.Name.Name, fields, parents, checked, warned, false)
 		}
+		warned[parentName] = true
 		return
 	}
 	_, args, _ := comp.getArgsBase(t, "", prog.DirIn, isArg)
 	for i, arg := range args {
 		argDesc := desc.Args[i]
 		if argDesc.Type == typeArgLenTarget {
-			comp.checkLenTarget(t, name, arg.Ident, fields, parents)
+			comp.checkLenTarget(t, name, arg.Ident, fields, parents, warned)
 		} else if argDesc.Type == typeArgType {
-			comp.checkLenType(arg, name, fields, parents, checked, argDesc.IsArg)
+			comp.checkLenType(arg, name, fields, parents, checked, warned, argDesc.IsArg)
 		}
 	}
 }
 
-func (comp *compiler) checkLenTarget(t *ast.Type, name, target string, fields []*ast.Field, parents []*ast.Struct) {
+func (comp *compiler) checkLenTarget(t *ast.Type, name, target string, fields []*ast.Field,
+	parents []string, warned map[string]bool) {
 	if target == name {
 		comp.error(t.Pos, "%v target %v refer to itself", t.Ident, target)
 		return
@@ -352,23 +363,72 @@ func (comp *compiler) checkLenTarget(t *ast.Type, name, target string, fields []
 				desc, args, _ = comp.getArgsBase(inner, "", prog.DirIn, false)
 			}
 			if desc == typeArray && comp.isVarlen(args[0]) {
-				comp.warning(t.Pos, "len target %v refer to an array with"+
-					" variable-size elements (do you mean bytesize?)", target)
+				// We can reach the same struct multiple times starting from different
+				// syscall arguments. Warn only once.
+				if len(parents) == 0 || !warned[parents[len(parents)-1]] {
+					comp.warning(t.Pos, "len target %v refer to an array with"+
+						" variable-size elements (do you mean bytesize?)", target)
+				}
 			}
 		}
 		return
 	}
 	for _, parent := range parents {
-		parentName := parent.Name.Name
-		if pos := strings.IndexByte(parentName, '['); pos != -1 {
-			// For template parents name is "struct_name[ARG1, ARG2]", strip the part after '['.
-			parentName = parentName[:pos]
-		}
-		if target == parentName {
+		if target == parent {
 			return
 		}
 	}
 	comp.error(t.Pos, "%v target %v does not exist", t.Ident, target)
+}
+
+func CollectUnused(desc *ast.Description, target *targets.Target, eh ast.ErrorHandler) ([]ast.Node, error) {
+	comp := createCompiler(desc, target, eh)
+	comp.typecheck()
+	if comp.errors > 0 {
+		return nil, errors.New("typecheck failed")
+	}
+
+	nodes := comp.collectUnused()
+	if comp.errors > 0 {
+		return nil, errors.New("collectUnused failed")
+	}
+	return nodes, nil
+}
+
+func (comp *compiler) collectUnused() []ast.Node {
+	var unused []ast.Node
+
+	comp.used, _, _ = comp.collectUsed(false)
+	structs, flags, strflags := comp.collectUsed(true)
+	_, _, _ = structs, flags, strflags
+
+	for name, n := range comp.intFlags {
+		if !flags[name] {
+			unused = append(unused, n)
+		}
+	}
+	for name, n := range comp.strFlags {
+		if !strflags[name] && builtinStrFlags[name] == nil {
+			unused = append(unused, n)
+		}
+	}
+	for name, n := range comp.resources {
+		if !structs[name] {
+			unused = append(unused, n)
+		}
+	}
+	for name, n := range comp.structs {
+		if !structs[name] {
+			unused = append(unused, n)
+		}
+	}
+	for name, n := range comp.typedefs {
+		if !comp.usedTypedefs[name] {
+			unused = append(unused, n)
+		}
+	}
+
+	return unused
 }
 
 func (comp *compiler) collectUsed(all bool) (structs, flags, strflags map[string]bool) {
@@ -432,35 +492,9 @@ func (comp *compiler) collectUsedType(structs, flags, strflags map[string]bool, 
 }
 
 func (comp *compiler) checkUnused() {
-	comp.used, _, _ = comp.collectUsed(false)
-	structs, flags, strflags := comp.collectUsed(true)
-	_, _, _ = structs, flags, strflags
-
-	for name, n := range comp.intFlags {
-		if !flags[name] {
-			comp.error(n.Pos, "unused flags %v", name)
-		}
-	}
-	for name, n := range comp.strFlags {
-		if !strflags[name] && builtinStrFlags[name] == nil {
-			comp.error(n.Pos, "unused string flags %v", name)
-		}
-	}
-	for name, n := range comp.resources {
-		if !structs[name] {
-			comp.error(n.Pos, "unused resource %v", name)
-		}
-	}
-	for name, n := range comp.structs {
-		if !structs[name] {
-			_, typ, _ := n.Info()
-			comp.error(n.Pos, "unused %v %v", typ, name)
-		}
-	}
-	for name, n := range comp.typedefs {
-		if !comp.usedTypedefs[name] {
-			comp.error(n.Pos, "unused type %v", name)
-		}
+	for _, n := range comp.collectUnused() {
+		pos, typ, name := n.Info()
+		comp.error(pos, fmt.Sprintf("unused %v %v", typ, name))
 	}
 }
 
@@ -725,7 +759,8 @@ func (comp *compiler) checkTypeBasic(t *ast.Type, desc *typeDesc, flags checkFla
 		comp.error(t.Pos, "%v can't be type alias target", t.Ident)
 		return
 	}
-	if flags&checkIsResourceBase != 0 && !desc.ResourceBase {
+	if flags&checkIsResourceBase != 0 &&
+		(desc.CanBeResourceBase == nil || !desc.CanBeResourceBase(comp, t)) {
 		comp.error(t.Pos, "%v can't be resource base (int types can)", t.Ident)
 		return
 	}
@@ -835,8 +870,9 @@ func (comp *compiler) replaceTypedef(ctx *checkCtx, t *ast.Type, flags checkFlag
 	t.Pos = pos0
 
 	// Remove base type if it's not needed in this context.
+	// If desc is nil, will return an error later when we typecheck the result.
 	desc := comp.getTypeDesc(t)
-	if flags&checkIsArg != 0 && desc.NeedBase {
+	if desc != nil && flags&checkIsArg != 0 && desc.NeedBase {
 		baseTypePos := len(t.Args) - 1
 		if t.Args[baseTypePos].Ident == "opt" {
 			baseTypePos--
