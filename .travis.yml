@@ -1,9 +1,9 @@
 language: go
-dist: trusty
+dist: xenial
 
 go:
-  - "1.9"
-  - "1.10"
+  - "1.11"
+  - "1.12"
 
 before_install:
   - echo $PATH
@@ -23,6 +23,9 @@ install: true
 script:
   - make install_prerequisites
   - make presubmit
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
 
 # If the build fails because some code in not formatted, it's nice to see the diffs after formatting.
 after_failure:

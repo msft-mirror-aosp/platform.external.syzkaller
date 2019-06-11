@@ -116,13 +116,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create default ipc config: %v", err)
 	}
-	sandbox := "none"
-	if config.Flags&ipc.FlagSandboxSetuid != 0 {
-		sandbox = "setuid"
-	} else if config.Flags&ipc.FlagSandboxNamespace != 0 {
-		sandbox = "namespace"
-	}
-
+	sandbox := ipc.FlagsToSandbox(config.Flags)
 	shutdown := make(chan struct{})
 	osutil.HandleInterrupts(shutdown)
 	go func() {
@@ -181,7 +175,7 @@ func main() {
 			log.Fatalf("%v", r.CheckResult.Error)
 		}
 	}
-	log.Logf(0, "syscalls: %v", len(r.CheckResult.EnabledCalls))
+	log.Logf(0, "syscalls: %v", len(r.CheckResult.EnabledCalls[sandbox]))
 	for _, feat := range r.CheckResult.Features {
 		log.Logf(0, "%v: %v", feat.Name, feat.Reason)
 	}
@@ -189,15 +183,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("BUG: %v", err)
 	}
+	var gateCallback func()
+	if periodicCallback != nil {
+		gateCallback = func() { periodicCallback(r.MemoryLeakFrames) }
+	}
+	if r.CheckResult.Features[host.FeatureExtraCoverage].Enabled {
+		config.Flags |= ipc.FlagExtraCover
+	}
+	if r.CheckResult.Features[host.FeatureFaultInjection].Enabled {
+		config.Flags |= ipc.FlagEnableFault
+	}
 	if r.CheckResult.Features[host.FeatureNetworkInjection].Enabled {
 		config.Flags |= ipc.FlagEnableTun
 	}
 	if r.CheckResult.Features[host.FeatureNetworkDevices].Enabled {
 		config.Flags |= ipc.FlagEnableNetDev
 	}
-	if r.CheckResult.Features[host.FeatureFaultInjection].Enabled {
-		config.Flags |= ipc.FlagEnableFault
-	}
+	config.Flags |= ipc.FlagEnableNetReset
+	config.Flags |= ipc.FlagEnableCgroups
+	config.Flags |= ipc.FlagEnableBinfmtMisc
+	config.Flags |= ipc.FlagEnableCloseFds
 
 	if *flagRunTest {
 		runTest(target, manager, *flagName, config.Executor)
@@ -211,7 +216,7 @@ func main() {
 		outputType:               outputType,
 		config:                   config,
 		execOpts:                 execOpts,
-		gate:                     ipc.NewGate(2**flagProcs, periodicCallback),
+		gate:                     ipc.NewGate(2**flagProcs, gateCallback),
 		workQueue:                newWorkQueue(*flagProcs, needPoll),
 		needPoll:                 needPoll,
 		manager:                  manager,
@@ -299,7 +304,7 @@ func (fuzzer *Fuzzer) poll(needCandidates bool, stats map[string]uint64) bool {
 		fuzzer.addInputFromAnotherFuzzer(inp)
 	}
 	for _, candidate := range r.Candidates {
-		p, err := fuzzer.target.Deserialize(candidate.Prog)
+		p, err := fuzzer.target.Deserialize(candidate.Prog, prog.NonStrict)
 		if err != nil {
 			log.Fatalf("failed to parse program from manager: %v", err)
 		}
@@ -329,7 +334,7 @@ func (fuzzer *Fuzzer) sendInputToManager(inp rpctype.RPCInput) {
 }
 
 func (fuzzer *Fuzzer) addInputFromAnotherFuzzer(inp rpctype.RPCInput) {
-	p, err := fuzzer.target.Deserialize(inp.Prog)
+	p, err := fuzzer.target.Deserialize(inp.Prog, prog.NonStrict)
 	if err != nil {
 		log.Fatalf("failed to deserialize prog from another fuzzer: %v", err)
 	}
@@ -386,30 +391,40 @@ func (fuzzer *Fuzzer) corpusSignalDiff(sign signal.Signal) signal.Signal {
 	return fuzzer.corpusSignal.Diff(sign)
 }
 
-func (fuzzer *Fuzzer) checkNewSignal(p *prog.Prog, info []ipc.CallInfo) (calls []int) {
+func (fuzzer *Fuzzer) checkNewSignal(p *prog.Prog, info *ipc.ProgInfo) (calls []int, extra bool) {
 	fuzzer.signalMu.RLock()
 	defer fuzzer.signalMu.RUnlock()
-	for i, inf := range info {
-		diff := fuzzer.maxSignal.DiffRaw(inf.Signal, signalPrio(p.Target, p.Calls[i], &inf))
-		if diff.Empty() {
-			continue
+	for i, inf := range info.Calls {
+		if fuzzer.checkNewCallSignal(p, &inf, i) {
+			calls = append(calls, i)
 		}
-		calls = append(calls, i)
-		fuzzer.signalMu.RUnlock()
-		fuzzer.signalMu.Lock()
-		fuzzer.maxSignal.Merge(diff)
-		fuzzer.newSignal.Merge(diff)
-		fuzzer.signalMu.Unlock()
-		fuzzer.signalMu.RLock()
 	}
+	extra = fuzzer.checkNewCallSignal(p, &info.Extra, -1)
 	return
 }
 
-func signalPrio(target *prog.Target, c *prog.Call, ci *ipc.CallInfo) (prio uint8) {
-	if ci.Errno == 0 {
+func (fuzzer *Fuzzer) checkNewCallSignal(p *prog.Prog, info *ipc.CallInfo, call int) bool {
+	diff := fuzzer.maxSignal.DiffRaw(info.Signal, signalPrio(p, info, call))
+	if diff.Empty() {
+		return false
+	}
+	fuzzer.signalMu.RUnlock()
+	fuzzer.signalMu.Lock()
+	fuzzer.maxSignal.Merge(diff)
+	fuzzer.newSignal.Merge(diff)
+	fuzzer.signalMu.Unlock()
+	fuzzer.signalMu.RLock()
+	return true
+}
+
+func signalPrio(p *prog.Prog, info *ipc.CallInfo, call int) (prio uint8) {
+	if call == -1 {
+		return 0
+	}
+	if info.Errno == 0 {
 		prio |= 1 << 1
 	}
-	if !target.CallContainsAny(c) {
+	if !p.Target.CallContainsAny(p.Calls[call]) {
 		prio |= 1 << 0
 	}
 	return

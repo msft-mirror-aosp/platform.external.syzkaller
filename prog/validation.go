@@ -5,10 +5,13 @@ package prog
 
 import (
 	"fmt"
-	"path/filepath"
 )
 
-var debug = false // enabled in tests
+var debug = false // enabled in tests and fuzzers
+
+func Debug() {
+	debug = true
+}
 
 func (p *Prog) debugValidate() {
 	if debug {
@@ -173,16 +176,6 @@ func (arg *DataArg) validate(ctx *validCtx) error {
 			return fmt.Errorf("string arg '%v' has size %v, which should be %v",
 				typ.Name(), arg.Size(), typ.TypeSize)
 		}
-	case BufferFilename:
-		file := string(arg.data)
-		for len(file) != 0 && file[len(file)-1] == 0 {
-			file = file[:len(file)-1]
-		}
-		file = filepath.Clean(file)
-		if len(file) > 0 && file[0] == '/' ||
-			len(file) > 1 && file[0] == '.' && file[1] == '.' {
-			return fmt.Errorf("sandbox escaping file name %q", string(arg.data))
-		}
 	}
 	return nil
 }
@@ -241,9 +234,6 @@ func (arg *PointerArg) validate(ctx *validCtx) error {
 			return fmt.Errorf("vma arg '%v' has data", typ.Name())
 		}
 	case *PtrType:
-		if arg.Res == nil && !arg.Type().Optional() {
-			return fmt.Errorf("non optional pointer arg '%v' is nil", typ.Name())
-		}
 		if arg.Res != nil {
 			if err := ctx.validateArg(arg.Res, typ.Type); err != nil {
 				return err
@@ -258,14 +248,20 @@ func (arg *PointerArg) validate(ctx *validCtx) error {
 	default:
 		return fmt.Errorf("ptr arg %v has bad type %v", arg, typ.Name())
 	}
-	maxMem := ctx.target.NumPages * ctx.target.PageSize
-	size := arg.VmaSize
-	if size == 0 && arg.Res != nil {
-		size = arg.Res.Size()
-	}
-	if arg.Address >= maxMem || arg.Address+size > maxMem {
-		return fmt.Errorf("ptr %v has bad address %v/%v/%v",
-			arg.Type().Name(), arg.Address, arg.VmaSize, size)
+	if arg.IsSpecial() {
+		if -arg.Address >= uint64(len(ctx.target.SpecialPointers)) {
+			return fmt.Errorf("special ptr arg %v has bad value 0x%x", arg.Type().Name(), arg.Address)
+		}
+	} else {
+		maxMem := ctx.target.NumPages * ctx.target.PageSize
+		size := arg.VmaSize
+		if size == 0 && arg.Res != nil {
+			size = arg.Res.Size()
+		}
+		if arg.Address >= maxMem || arg.Address+size > maxMem {
+			return fmt.Errorf("ptr %v has bad address %v/%v/%v",
+				arg.Type().Name(), arg.Address, arg.VmaSize, size)
+		}
 	}
 	return nil
 }
