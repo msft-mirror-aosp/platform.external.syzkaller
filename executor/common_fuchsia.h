@@ -3,9 +3,8 @@
 
 // This file is shared between executor and csource package.
 
-#include <ddk/driver.h>
 #include <fcntl.h>
-#include <lib/fdio/util.h>
+#include <lib/fdio/directory.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -22,6 +21,10 @@
 #include <zircon/process.h>
 #include <zircon/syscalls.h>
 
+#if SYZ_EXECUTOR || __NR_get_root_resource
+#include <ddk/driver.h>
+#endif
+
 #if SYZ_EXECUTOR || SYZ_HANDLE_SEGV
 #include <pthread.h>
 #include <setjmp.h>
@@ -33,7 +36,7 @@
 static __thread int skip_segv;
 static __thread jmp_buf segv_env;
 
-static void segv_handler()
+static void segv_handler(void)
 {
 	if (__atomic_load_n(&skip_segv, __ATOMIC_RELAXED)) {
 		debug("recover: skipping\n");
@@ -81,9 +84,9 @@ static void* ex_handler(void* arg)
 				debug("zx_thread_write_state failed: %d\n", status);
 			}
 		}
-		status = zx_task_resume(thread, ZX_RESUME_EXCEPTION);
+		status = zx_task_resume_from_exception(thread, port, 0);
 		if (status != ZX_OK) {
-			debug("zx_task_resume failed: %d\n", status);
+			debug("zx_task_resume_from_exception failed: %d\n", status);
 		}
 		zx_handle_close(thread);
 	}
@@ -91,7 +94,7 @@ static void* ex_handler(void* arg)
 	return 0;
 }
 
-static void install_segv_handler()
+static void install_segv_handler(void)
 {
 	zx_status_t status;
 	zx_handle_t port;
@@ -173,56 +176,63 @@ long syz_mmap(size_t addr, size_t size)
 		fail("zx_object_get_info(ZX_INFO_VMAR) failed: %d", status);
 	zx_handle_t vmo;
 	status = zx_vmo_create(size, 0, &vmo);
+	if (status != ZX_OK) {
+		debug("zx_vmo_create failed with: %d\n", status);
+		return status;
+	}
+	status = zx_vmo_replace_as_executable(vmo, ZX_HANDLE_INVALID, &vmo);
 	if (status != ZX_OK)
 		return status;
 	uintptr_t mapped_addr;
-	status = zx_vmar_map(root, addr - info.base, vmo, 0, size,
-			     ZX_VM_FLAG_SPECIFIC_OVERWRITE | ZX_VM_FLAG_PERM_READ |
-				 ZX_VM_FLAG_PERM_WRITE | ZX_VM_FLAG_PERM_EXECUTE,
+	status = zx_vmar_map(root, ZX_VM_FLAG_SPECIFIC_OVERWRITE | ZX_VM_FLAG_PERM_READ | ZX_VM_FLAG_PERM_WRITE | ZX_VM_FLAG_PERM_EXECUTE,
+			     addr - info.base, vmo, 0, size,
 			     &mapped_addr);
 	return status;
 }
 #endif
 
 #if SYZ_EXECUTOR || __NR_syz_process_self
-static long syz_process_self()
+static long syz_process_self(void)
 {
 	return zx_process_self();
 }
 #endif
 
 #if SYZ_EXECUTOR || __NR_syz_thread_self
-static long syz_thread_self()
+static long syz_thread_self(void)
 {
 	return zx_thread_self();
 }
 #endif
 
 #if SYZ_EXECUTOR || __NR_syz_vmar_root_self
-static long syz_vmar_root_self()
+static long syz_vmar_root_self(void)
 {
 	return zx_vmar_root_self();
 }
 #endif
 
 #if SYZ_EXECUTOR || __NR_syz_job_default
-static long syz_job_default()
+static long syz_job_default(void)
 {
 	return zx_job_default();
 }
 #endif
 
 #if SYZ_EXECUTOR || __NR_syz_future_time
-static long syz_future_time(long when)
+static long syz_future_time(volatile long when)
 {
 	zx_time_t delta_ms;
 	switch (when) {
 	case 0:
 		delta_ms = 5;
+		break;
 	case 1:
 		delta_ms = 30;
+		break;
 	default:
 		delta_ms = 10000;
+		break;
 	}
 	zx_time_t now = zx_clock_get(ZX_CLOCK_MONOTONIC);
 	return now + delta_ms * 1000 * 1000;
@@ -238,7 +248,6 @@ static int do_sandbox_none(void)
 }
 #endif
 
-#if SYZ_EXECUTOR
-#define do_sandbox_setuid() 0
-#define do_sandbox_namespace() 0
-#endif
+// Ugly way to work around gcc's "error: function called through a non-compatible type".
+// The macro is used in generated C code.
+#define CAST(f) ({void* p = (void*)f; p; })

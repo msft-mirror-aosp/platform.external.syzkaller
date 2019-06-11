@@ -34,11 +34,11 @@ func testImage(hostAddr string, args *checkArgs) {
 	log.Logf(0, "connecting to host at %v", hostAddr)
 	conn, err := rpctype.Dial(hostAddr)
 	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
+		log.Fatalf("BUG: failed to connect to host: %v", err)
 	}
 	conn.Close()
 	if _, err := checkMachine(args); err != nil {
-		log.Fatalf("%v", err)
+		log.Fatalf("BUG: %v", err)
 	}
 }
 
@@ -90,7 +90,7 @@ func convertTestReq(target *prog.Target, req *rpctype.RunTestPollRes) *runtest.R
 		test.Bin = bin
 	}
 	if len(req.Prog) != 0 {
-		p, err := target.Deserialize(req.Prog)
+		p, err := target.Deserialize(req.Prog, prog.NonStrict)
 		if err != nil {
 			test.Err = err
 			return test
@@ -101,6 +101,7 @@ func convertTestReq(target *prog.Target, req *rpctype.RunTestPollRes) *runtest.R
 }
 
 func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
+	log.Logf(0, "checking machine...")
 	// Machine checking can be very slow on some machines (qemu without kvm, KMEMLEAK linux, etc),
 	// so print periodic heartbeats for vm.MonitorExecution so that it does not decide that we are dead.
 	done := make(chan bool)
@@ -135,6 +136,10 @@ func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
 	if feat := features[host.FeatureSandboxNamespace]; !feat.Enabled &&
 		args.ipcConfig.Flags&ipc.FlagSandboxNamespace != 0 {
 		return nil, fmt.Errorf("sandbox=namespace is not supported (%v)", feat.Reason)
+	}
+	if feat := features[host.FeatureSandboxAndroidUntrustedApp]; !feat.Enabled &&
+		args.ipcConfig.Flags&ipc.FlagSandboxAndroidUntrustedApp != 0 {
+		return nil, fmt.Errorf("sandbox=android_untrusted_app is not supported (%v)", feat.Reason)
 	}
 	if err := checkSimpleProgram(args); err != nil {
 		return nil, err
@@ -223,26 +228,23 @@ func checkSimpleProgram(args *checkArgs) error {
 	}
 	defer env.Close()
 	p := args.target.GenerateSimpleProg()
-	output, info, failed, hanged, err := env.Exec(args.ipcExecOpts, p)
+	output, info, hanged, err := env.Exec(args.ipcExecOpts, p)
 	if err != nil {
 		return fmt.Errorf("program execution failed: %v\n%s", err, output)
 	}
 	if hanged {
 		return fmt.Errorf("program hanged:\n%s", output)
 	}
-	if failed {
-		return fmt.Errorf("program failed:\n%s", output)
-	}
-	if len(info) == 0 {
+	if len(info.Calls) == 0 {
 		return fmt.Errorf("no calls executed:\n%s", output)
 	}
-	if info[0].Errno != 0 {
-		return fmt.Errorf("simple call failed: %+v\n%s", info[0], output)
+	if info.Calls[0].Errno != 0 {
+		return fmt.Errorf("simple call failed: %+v\n%s", info.Calls[0], output)
 	}
-	if args.ipcConfig.Flags&ipc.FlagSignal != 0 && len(info[0].Signal) < 2 {
+	if args.ipcConfig.Flags&ipc.FlagSignal != 0 && len(info.Calls[0].Signal) < 2 {
 		return fmt.Errorf("got no coverage:\n%s", output)
 	}
-	if len(info[0].Signal) < 1 {
+	if len(info.Calls[0].Signal) < 1 {
 		return fmt.Errorf("got no fallback coverage:\n%s", output)
 	}
 	return nil
@@ -250,6 +252,7 @@ func checkSimpleProgram(args *checkArgs) error {
 
 func buildCallList(target *prog.Target, enabledCalls []int, sandbox string) (
 	enabled []int, disabled []rpctype.SyscallReason, err error) {
+	log.Logf(0, "building call list...")
 	calls := make(map[*prog.Syscall]bool)
 	if len(enabledCalls) != 0 {
 		for _, n := range enabledCalls {

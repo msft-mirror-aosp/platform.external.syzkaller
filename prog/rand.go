@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/google/syzkaller/pkg/ifuzz"
@@ -157,6 +158,9 @@ func (r *randGen) filename(s *state, typ *BufferType) string {
 	if len(fn) != 0 && fn[len(fn)-1] == 0 {
 		panic(fmt.Sprintf("zero-terminated filename: %q", fn))
 	}
+	if escapingFilename(fn) {
+		panic(fmt.Sprintf("sandbox escaping file name %q, s.files are %v", fn, s.files))
+	}
 	if !typ.Varlen() {
 		size := typ.Size()
 		if uint64(len(fn)) < size {
@@ -169,6 +173,12 @@ func (r *randGen) filename(s *state, typ *BufferType) string {
 	return fn
 }
 
+func escapingFilename(file string) bool {
+	file = filepath.Clean(file)
+	return len(file) >= 1 && file[0] == '/' ||
+		len(file) >= 2 && file[0] == '.' && file[1] == '.'
+}
+
 var specialFiles = []string{"", "."}
 
 func (r *randGen) filenameImpl(s *state) string {
@@ -179,11 +189,7 @@ func (r *randGen) filenameImpl(s *state) string {
 		// Generate a new name.
 		dir := "."
 		if r.oneOf(2) && len(s.files) != 0 {
-			files := make([]string, 0, len(s.files))
-			for f := range s.files {
-				files = append(files, f)
-			}
-			dir = files[r.Intn(len(files))]
+			dir = r.randFromMap(s.files)
 			if len(dir) > 0 && dir[len(dir)-1] == 0 {
 				dir = dir[:len(dir)-1]
 			}
@@ -198,10 +204,15 @@ func (r *randGen) filenameImpl(s *state) string {
 			}
 		}
 	}
-	files := make([]string, 0, len(s.files))
-	for f := range s.files {
+	return r.randFromMap(s.files)
+}
+
+func (r *randGen) randFromMap(m map[string]bool) string {
+	files := make([]string, 0, len(m))
+	for f := range m {
 		files = append(files, f)
 	}
+	sort.Strings(files)
 	return files[r.Intn(len(files))]
 }
 
@@ -212,11 +223,7 @@ func (r *randGen) randString(s *state, t *BufferType) []byte {
 	if len(s.strings) != 0 && r.bin() {
 		// Return an existing string.
 		// TODO(dvyukov): make s.strings indexed by string SubKind.
-		strings := make([]string, 0, len(s.strings))
-		for s := range s.strings {
-			strings = append(strings, s)
-		}
-		return []byte(strings[r.Intn(len(strings))])
+		return []byte(r.randFromMap(s.strings))
 	}
 	punct := []byte{'!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '+', '\\',
 		'/', ':', '.', ',', '-', '\'', '[', ']', '{', '}'}
@@ -258,7 +265,8 @@ func (r *randGen) createResource(s *state, res *ResourceType) (arg Arg, calls []
 	defer func() { r.inCreateResource = false }()
 
 	kind := res.Desc.Name
-	if r.oneOf(1000) {
+	// We may have no resources, but still be in createResource due to ANYRES.
+	if len(r.target.resourceMap) != 0 && r.oneOf(1000) {
 		// Spoof resource subkind.
 		var all []string
 		for kind1 := range r.target.resourceMap {
@@ -266,6 +274,11 @@ func (r *randGen) createResource(s *state, res *ResourceType) (arg Arg, calls []
 				all = append(all, kind1)
 			}
 		}
+		if len(all) == 0 {
+			panic(fmt.Sprintf("got no spoof resources for %v in %v/%v",
+				kind, r.target.OS, r.target.Arch))
+		}
+		sort.Strings(all)
 		kind = all[r.Intn(len(all))]
 	}
 	// Find calls that produce the necessary resources.
@@ -279,7 +292,7 @@ func (r *randGen) createResource(s *state, res *ResourceType) (arg Arg, calls []
 		metas = append(metas, meta)
 	}
 	if len(metas) == 0 {
-		return res.makeDefaultArg(), nil
+		return res.DefaultArg(), nil
 	}
 
 	// Now we have a set of candidate calls that can create the necessary resource.
@@ -326,6 +339,12 @@ func (r *randGen) createResource(s *state, res *ResourceType) (arg Arg, calls []
 
 func (r *randGen) generateText(kind TextKind) []byte {
 	switch kind {
+	case TextTarget:
+		if r.target.Arch == "amd64" || r.target.Arch == "386" {
+			cfg := createTargetIfuzzConfig(r.target)
+			return ifuzz.Generate(cfg, r.Rand)
+		}
+		fallthrough
 	case TextArm64:
 		// Just a stub, need something better.
 		text := make([]byte, 50)
@@ -341,12 +360,44 @@ func (r *randGen) generateText(kind TextKind) []byte {
 
 func (r *randGen) mutateText(kind TextKind, text []byte) []byte {
 	switch kind {
+	case TextTarget:
+		if r.target.Arch == "amd64" || r.target.Arch == "386" {
+			cfg := createTargetIfuzzConfig(r.target)
+			return ifuzz.Mutate(cfg, r.Rand, text)
+		}
+		fallthrough
 	case TextArm64:
 		return mutateData(r, text, 40, 60)
 	default:
 		cfg := createIfuzzConfig(kind)
 		return ifuzz.Mutate(cfg, r.Rand, text)
 	}
+}
+
+func createTargetIfuzzConfig(target *Target) *ifuzz.Config {
+	cfg := &ifuzz.Config{
+		Len:  10,
+		Priv: false,
+		Exec: true,
+		MemRegions: []ifuzz.MemRegion{
+			{Start: target.DataOffset, Size: target.NumPages * target.PageSize},
+		},
+	}
+	for _, p := range target.SpecialPointers {
+		cfg.MemRegions = append(cfg.MemRegions, ifuzz.MemRegion{
+			Start: p & ^target.PageSize, Size: p & ^target.PageSize + target.PageSize,
+		})
+	}
+	switch target.Arch {
+	case "amd64":
+		cfg.Mode = ifuzz.ModeLong64
+	case "386":
+		cfg.Mode = ifuzz.ModeProt32
+	default:
+		panic("unknown text kind")
+	}
+	return cfg
+
 }
 
 func createIfuzzConfig(kind TextKind) *ifuzz.Config {
@@ -377,6 +428,8 @@ func createIfuzzConfig(kind TextKind) *ifuzz.Config {
 		cfg.Mode = ifuzz.ModeProt32
 	case TextX86bit64:
 		cfg.Mode = ifuzz.ModeLong64
+	default:
+		panic("unknown text kind")
 	}
 	return cfg
 }
@@ -490,7 +543,7 @@ func (r *randGen) generateArgImpl(s *state, typ Type, ignoreSpecial bool) (arg A
 		switch typ.(type) {
 		case *IntType, *FlagsType, *ConstType, *ProcType,
 			*VmaType, *ResourceType:
-			return typ.makeDefaultArg(), nil
+			return typ.DefaultArg(), nil
 		}
 	}
 
@@ -499,7 +552,7 @@ func (r *randGen) generateArgImpl(s *state, typ Type, ignoreSpecial bool) (arg A
 			v := res.Desc.Values[r.Intn(len(res.Desc.Values))]
 			return MakeResultArg(typ, nil, v), nil
 		}
-		return typ.makeDefaultArg(), nil
+		return typ.DefaultArg(), nil
 	}
 
 	// Allow infinite recursion for optional pointers.
@@ -515,7 +568,7 @@ func (r *randGen) generateArgImpl(s *state, typ Type, ignoreSpecial bool) (arg A
 				}
 			}()
 			if r.recDepth[name] >= 3 {
-				return MakeNullPointerArg(typ), nil
+				return MakeSpecialPointerArg(typ, 0), nil
 			}
 		}
 	}
@@ -536,8 +589,16 @@ func (a *ResourceType) generate(r *randGen, s *state) (arg Arg, calls []*Call) {
 	switch {
 	case r.nOutOf(1000, 1011):
 		// Get an existing resource.
+		alltypes := make([][]*ResultArg, 0, len(s.resources))
+		for _, res1 := range s.resources {
+			alltypes = append(alltypes, res1)
+		}
+		sort.Slice(alltypes, func(i, j int) bool {
+			return alltypes[i][0].Type().Name() < alltypes[j][0].Type().Name()
+		})
 		var allres []*ResultArg
-		for name1, res1 := range s.resources {
+		for _, res1 := range alltypes {
+			name1 := res1[0].Type().Name()
 			if r.target.isCompatibleResource(a.Desc.Name, name1) ||
 				r.oneOf(20) && r.target.isCompatibleResource(a.Desc.Kind[0], name1) {
 				allres = append(allres, res1...)
@@ -673,6 +734,10 @@ func (a *UnionType) generate(r *randGen, s *state) (arg Arg, calls []*Call) {
 }
 
 func (a *PtrType) generate(r *randGen, s *state) (arg Arg, calls []*Call) {
+	if r.oneOf(1000) {
+		index := r.rand(len(r.target.SpecialPointers))
+		return MakeSpecialPointerArg(a, index), nil
+	}
 	inner, calls := r.generateArg(s, a.Type)
 	arg = r.allocAddr(s, a, inner.Size(), inner)
 	return arg, calls

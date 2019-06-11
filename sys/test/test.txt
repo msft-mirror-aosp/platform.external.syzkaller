@@ -3,11 +3,18 @@
 
 # Syscalls used in syzkaller tests.
 
+syz_execute_func(text ptr[in, text[target]])
+
 test()
 
 # Integer types.
 
 test$int(a0 intptr, a1 int8, a2 int16, a3 int32, a4 int64)
+
+# String types.
+
+test$str0(a ptr[in, string])
+test$blob0(a ptr[in, array[int8]])
 
 # Opt arguments
 
@@ -509,6 +516,22 @@ syz_bf_struct1 {
 	f1	int8
 }
 
+syz_bf_struct2 {
+	f0	int64:4
+	f1	int64:8
+	f2	int64:12
+	f3	int64:20
+	f4	int64:16
+}
+
+syz_bf_struct3 {
+	f0	int64be:4
+	f1	int64be:8
+	f2	int64be:12
+	f3	int64be:20
+	f4	int64be:16
+}
+
 test$bf0(a0 ptr[in, syz_bf_struct0])
 test$bf1(a0 ptr[in, syz_bf_struct1])
 
@@ -619,7 +642,7 @@ test$recur2(a0 ptr[inout, syz_recur_2])
 
 # Resources.
 
-resource fd[int32]: 0xffffffffffffffff
+resource fd[int32]: 0xffffffffffffffff, 999
 resource syz_res[int32]: 0xffff
 
 test$res0() syz_res
@@ -679,3 +702,19 @@ resource unsupported[int32]
 
 unsupported$0(a unsupported) unsupported
 unsupported$1(a unsupported) unsupported
+
+# Fallback coverage.
+
+fallback$0() fd
+fallback$1(a fd)
+seccomp()
+
+# AUTO
+
+test$auto0(a const[0x42], b ptr[in, auto_struct0], c len[b], d int32)
+
+auto_struct0 {
+	f0	len[parent, int32]
+	f1	const[0x43, int32]
+	f2	int32
+}

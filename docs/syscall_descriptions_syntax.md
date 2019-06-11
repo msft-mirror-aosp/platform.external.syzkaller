@@ -8,7 +8,7 @@ arg = argname type
 argname = identifier
 type = typename [ "[" type-options "]" ]
 typename = "const" | "intN" | "intptr" | "flags" | "array" | "ptr" |
-	   "buffer" | "string" | "strconst" | "filename" | "len" |
+	   "string" | "strconst" | "filename" | "len" |
 	   "bytesize" | "bytesizeN" | "bitsize" | "vma" | "proc"
 type-options = [type-opt ["," type-opt]]
 ```
@@ -23,7 +23,7 @@ rest of the type-options are type-specific:
 
 ```
 "const": integer constant, type-options:
-	value, underlying type (one if "intN", "intptr")
+	value, underlying type (one of "intN", "intptr")
 "intN"/"intptr": an integer without a particular meaning, type-options:
 	optional range of values (e.g. "5:10", or "100:200")
 "flags": a set of flags, type-options:
@@ -33,8 +33,6 @@ rest of the type-options are type-specific:
 "ptr"/"ptr64": a pointer to an object, type-options:
 	type of the object; direction (in/out/inout)
 	ptr64 has size of 8 bytes regardless of target pointer size
-"buffer": a pointer to a memory buffer (like read/write buffer argument), type-options:
-	direction (in/out/inout)
 "string": a zero-terminated memory buffer (no pointer indirection implied), type-options:
 	either a string value in quotes for constant strings (e.g. "foo"),
 	or a reference to string flags (special value `filename` produces file names),
@@ -52,8 +50,9 @@ rest of the type-options are type-specific:
 	argname of the object
 "bitsize": similar to "len", but always denotes the size in bits, type-options:
 	argname of the object
-"vma": a pointer to a set of pages (used as input for mmap/munmap/mremap/madvise), type-options:
+"vma"/"vma64": a pointer to a set of pages (used as input for mmap/munmap/mremap/madvise), type-options:
 	optional number of pages (e.g. vma[7]), or a range of pages (e.g. vma[2-4])
+	vma64 has size of 8 bytes regardless of target pointer size
 "proc": per process int (see description below), type-options:
 	value range start, how many values per process, underlying type
 "text": machine code of the specified type, type-options:
@@ -117,8 +116,6 @@ Attributes are:
 "size": the struct is padded up to the specified size
 ```
 
-attribute
-
 ## Unions
 
 Unions are described as:
@@ -126,12 +123,16 @@ Unions are described as:
 ```
 unionname "[" "\n"
 	(fieldname type "\n")+
-"]"
+"]" ("[" attribute* "]")?
 ```
 
-Unions can have a trailing "varlen" attribute (specified in square brackets after the union),
-which means that union length is not maximum of all option lengths,
-but rather length of a particular chosen option.
+Unions can have attributes specified in square brackets after the union.
+Attributes are:
+
+```
+"varlen": union size is not maximum of all option but rather length of a particular chosen option
+"size": the union is padded up to the specified size
+```
 
 ## Resources
 
@@ -141,7 +142,7 @@ Resources represent values that need to be passed from output of one syscall to 
 "resource" identifier "[" underlying_type "]" [ ":" const ("," const)* ]
 ```
 
-`underlying_type` is either one of `int8`, `int16`, `int32`, `int64`, `intptr` or another resource (which models inheritance, for example, a socket is a subype of fd). The optional set of constants represent resource special values, for example, `0xffffffffffffffff` (-1) for "no fd", or `AT_FDCWD` for "the current dir". Special values are used once in a while as resource values. If no special values specified, special value of `0` is used. Resources can then be used as types, for example:
+`underlying_type` is either one of `int8`, `int16`, `int32`, `int64`, `intptr` or another resource (which models inheritance, for example, a socket is a subtype of fd). The optional set of constants represent resource special values, for example, `0xffffffffffffffff` (-1) for "no fd", or `AT_FDCWD` for "the current dir". Special values are used once in a while as resource values. If no special values specified, special value of `0` is used. Resources can then be used as types, for example:
 
 ```
 resource fd[int32]: 0xffffffffffffffff, AT_FDCWD, 1000000
@@ -184,6 +185,8 @@ type bool64	int64[0:1]
 type boolptr	intptr[0:1]
 
 type filename string[filename]
+
+type buffer[DIR] ptr[DIR, array[int8]]
 ```
 
 ## Type Templates

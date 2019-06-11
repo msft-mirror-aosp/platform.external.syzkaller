@@ -13,13 +13,15 @@ func TestResourceCtors(t *testing.T) {
 		t.Skip("too slow")
 	}
 	testEachTarget(t, func(t *testing.T, target *Target) {
-		for _, c := range target.Syscalls {
-			for _, res := range target.inputResources(c) {
-				if len(target.calcResourceCtors(res.Kind, true)) == 0 {
-					t.Errorf("call %v requires input resource %v,"+
-						" but there are no calls that can create this resource",
-						c.Name, res.Name)
-				}
+		for _, res := range target.Resources {
+			// Remove this once io_uring_setup has syscall number of these archs.
+			expectFail := false
+			if res.Kind[len(res.Kind)-1] == "fd_io_uring" && target.OS == "linux" &&
+				(target.Arch == "arm" || target.Arch == "ppc64le") {
+				expectFail = true
+			}
+			if len(target.calcResourceCtors(res.Kind, true)) == 0 != expectFail {
+				t.Errorf("resource %v can't be created", res.Name)
 			}
 		}
 	})
@@ -49,11 +51,19 @@ func TestTransitivelyEnabledCalls(t *testing.T) {
 				}
 			}
 		} else {
-			if len(enabled) != len(target.Syscalls) {
+			expectDisabled := 0
+			if target.OS == "linux" && (target.Arch == "arm" || target.Arch == "ppc64le") {
+				// mmap$IORING* are disabled because io_uring_setup is not implemented.
+				// Remove this once io_uring_setup has syscall number of these archs.
+				expectDisabled = 3
+			}
+			if len(enabled) != len(target.Syscalls)-expectDisabled {
 				t.Errorf("some calls are disabled: %v/%v", len(enabled), len(target.Syscalls))
 			}
-			for c, reason := range disabled {
-				t.Errorf("disabled %v: %v", c.Name, reason)
+			if len(disabled) != expectDisabled {
+				for c, reason := range disabled {
+					t.Errorf("disabled %v: %v", c.Name, reason)
+				}
 			}
 		}
 	})
