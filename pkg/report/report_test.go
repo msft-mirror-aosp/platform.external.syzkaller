@@ -144,21 +144,7 @@ func testParseImpl(t *testing.T, reporter Reporter, test *ParseTest) {
 	}
 	if title != test.Title || corrupted != test.Corrupted || suppressed != test.Suppressed {
 		if *flagUpdate && test.StartLine == "" && test.EndLine == "" {
-			buf := new(bytes.Buffer)
-			fmt.Fprintf(buf, "TITLE: %v\n", title)
-			if corrupted {
-				fmt.Fprintf(buf, "CORRUPTED: Y\n")
-			}
-			if suppressed {
-				fmt.Fprintf(buf, "SUPPRESSED: Y\n")
-			}
-			fmt.Fprintf(buf, "\n%s", test.Log)
-			if test.HasReport {
-				fmt.Fprintf(buf, "REPORT:\n%s", test.Report)
-			}
-			if err := ioutil.WriteFile(test.FileName, buf.Bytes(), 0640); err != nil {
-				t.Logf("failed to update test file: %v", err)
-			}
+			updateReportTest(t, test, title, corrupted, suppressed)
 		}
 		t.Fatalf("want:\nTITLE: %s\nCORRUPTED: %v\nSUPPRESSED: %v\n"+
 			"got:\nTITLE: %s\nCORRUPTED: %v (%v)\nSUPPRESSED: %v\n",
@@ -168,8 +154,21 @@ func testParseImpl(t *testing.T, reporter Reporter, test *ParseTest) {
 	if title != "" && len(rep.Report) == 0 {
 		t.Fatalf("found crash message but report is empty")
 	}
-	if rep != nil {
-		checkReport(t, rep, test)
+	if rep == nil {
+		return
+	}
+	checkReport(t, rep, test)
+	if rep.StartPos != 0 {
+		// If we parse from StartPos, we must find the same report.
+		rep1 := reporter.Parse(test.Log[rep.StartPos:])
+		if rep1 == nil || rep1.Title != rep.Title {
+			t.Fatalf("did not find the same report from rep.StartPos=%v", rep.StartPos)
+		}
+		// If we parse from EndPos, we must not find the same report.
+		rep2 := reporter.Parse(test.Log[rep.EndPos:])
+		if rep2 != nil && rep2.Title == rep.Title {
+			t.Fatalf("found the same report after rep.EndPos=%v", rep.EndPos)
+		}
 	}
 }
 
@@ -179,6 +178,12 @@ func checkReport(t *testing.T, rep *Report, test *ParseTest) {
 	}
 	if !bytes.Equal(rep.Output, test.Log) {
 		t.Fatalf("bad Output:\n%s", rep.Output)
+	}
+	if rep.StartPos != 0 && rep.EndPos != 0 && rep.StartPos >= rep.EndPos {
+		t.Fatalf("StartPos=%v >= EndPos=%v", rep.StartPos, rep.EndPos)
+	}
+	if rep.EndPos > len(rep.Output) {
+		t.Fatalf("EndPos=%v > len(Output)=%v", rep.EndPos, len(rep.Output))
 	}
 	if test.StartLine != "" {
 		if test.EndLine == "" {
@@ -191,6 +196,24 @@ func checkReport(t *testing.T, rep *Report, test *ParseTest) {
 				rep.StartPos, rep.EndPos, startPos, endPos,
 				string(test.Log[rep.StartPos:rep.EndPos]))
 		}
+	}
+}
+
+func updateReportTest(t *testing.T, test *ParseTest, title string, corrupted, suppressed bool) {
+	buf := new(bytes.Buffer)
+	fmt.Fprintf(buf, "TITLE: %v\n", title)
+	if corrupted {
+		fmt.Fprintf(buf, "CORRUPTED: Y\n")
+	}
+	if suppressed {
+		fmt.Fprintf(buf, "SUPPRESSED: Y\n")
+	}
+	fmt.Fprintf(buf, "\n%s", test.Log)
+	if test.HasReport {
+		fmt.Fprintf(buf, "REPORT:\n%s", test.Report)
+	}
+	if err := ioutil.WriteFile(test.FileName, buf.Bytes(), 0640); err != nil {
+		t.Logf("failed to update test file: %v", err)
 	}
 }
 
@@ -220,8 +243,26 @@ func testGuiltyFile(t *testing.T, reporter Reporter, fn string) {
 	}
 	file := string(data[len(prefix) : len(prefix)+nlnl])
 	report := data[len(prefix)+nlnl:]
-	if guilty := reporter.(guilter).extractGuiltyFile(report); guilty != file {
-		t.Fatalf("got guilty %q, want %q", guilty, file)
+	rep := reporter.Parse(report)
+	if rep == nil {
+		t.Fatalf("did not find crash in the input")
+	}
+	// Parse doesn't generally run on already symbolized output,
+	// but here we run it on symbolized output because we can't symbolize in tests.
+	// The problem is with duplicated lines due to inlined frames,
+	// Parse can strip such report after first title line because it thinks
+	// that the duplicated title line is beginning on another report.
+	// In such case we restore whole report, but still keep StartPos that
+	// Parse produces at least in some cases.
+	if !bytes.HasSuffix(report, rep.Report) {
+		rep.Report = report
+		rep.StartPos = 0
+	}
+	if err := reporter.Symbolize(rep); err != nil {
+		t.Fatalf("failed to symbolize report: %v", err)
+	}
+	if rep.guiltyFile != file {
+		t.Fatalf("got guilty %q, want %q", rep.guiltyFile, file)
 	}
 }
 
@@ -237,7 +278,8 @@ func forEachFile(t *testing.T, dir string, fn func(t *testing.T, reporter Report
 			t.Fatal(err)
 		}
 		cfg := &mgrconfig.Config{
-			TargetOS: os,
+			TargetOS:   os,
+			TargetArch: "amd64",
 		}
 		reporter, err := NewReporter(cfg)
 		if err != nil {
@@ -282,5 +324,20 @@ func TestReplace(t *testing.T) {
 				t.Errorf("want '%v', got '%v'", test.result, string(result))
 			}
 		})
+	}
+}
+
+func TestFuzz(t *testing.T) {
+	for _, data := range []string{
+		"kernel panicType 'help' for a list of commands",
+		"0000000000000000000\n\n\n\n\n\nBooting the kernel.",
+		"ZIRCON KERNEL PANICHalted",
+		"BUG:Disabling lock debugging due to kernel taint",
+		"[0.0] WARNING: ? 0+0x0/0",
+		"BUG: login: [0.0] ",
+		"cleaned vnod\re",
+		"kernel\r:",
+	} {
+		Fuzz([]byte(data))
 	}
 }

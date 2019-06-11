@@ -17,14 +17,14 @@ func TestExtractCommand(t *testing.T) {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			cmd, args := extractCommand([]byte(test.body))
 			if cmd != test.cmd || !reflect.DeepEqual(args, test.args) {
-				t.Logf("expect: %q %q", test.cmd, test.args)
-				t.Logf("got   : %q %q", cmd, args)
+				t.Logf("expect: %v %q", test.cmd, test.args)
+				t.Logf("got   : %v %q", cmd, args)
 				t.Fail()
 			}
 			cmd, args = extractCommand([]byte(strings.Replace(test.body, "\n", "\r\n", -1)))
 			if cmd != test.cmd || !reflect.DeepEqual(args, test.args) {
-				t.Logf("expect: %q %q", test.cmd, test.args)
-				t.Logf("got   : %q %q", cmd, args)
+				t.Logf("expect: %v %q", test.cmd, test.args)
+				t.Logf("got   : %v %q", cmd, args)
 				t.Fail()
 			}
 		})
@@ -138,7 +138,7 @@ func TestParse(t *testing.T) {
 
 var extractCommandTests = []struct {
 	body string
-	cmd  string
+	cmd  Command
 	args string
 }{
 	{
@@ -146,17 +146,17 @@ var extractCommandTests = []struct {
 
 line1
 #syz  fix:  bar baz 	`,
-		cmd:  "fix:",
+		cmd:  CmdFix,
 		args: "bar baz",
 	},
 	{
 		body: `Hello,
 
 line1
-#syz fix:  bar  	 baz
+#syz fix  bar  	 baz
 line 2
 `,
-		cmd: "fix:",
+		cmd: CmdFix,
 		args: "bar  	 baz",
 	},
 	{
@@ -165,7 +165,7 @@ line1
 > #syz fix: bar   baz
 line 2
 `,
-		cmd:  "",
+		cmd:  CmdNone,
 		args: "",
 	},
 	// This is unfortunate case when a command is split by email client
@@ -175,15 +175,15 @@ line 2
 #syz test: git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git
 locking/core
 `,
-		cmd:  "test:",
+		cmd:  CmdTest,
 		args: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core",
 	},
 	{
 		body: `
-#syz test:
+#syz test
 git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core
 `,
-		cmd:  "test:",
+		cmd:  CmdTest,
 		args: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core",
 	},
 	{
@@ -193,7 +193,7 @@ git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git
 locking/core
 locking/core
 `,
-		cmd:  "test:",
+		cmd:  CmdTest,
 		args: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core",
 	},
 	{
@@ -205,14 +205,14 @@ locking/core
 arg4
 arg5
 `,
-		cmd:  "test_5_arg_cmd",
+		cmd:  cmdTest5,
 		args: "arg1 arg2 arg3 arg4 arg5",
 	},
 	{
 		body: `
 #syz test_5_arg_cmd arg1
 arg2`,
-		cmd:  "test_5_arg_cmd",
+		cmd:  cmdTest5,
 		args: "arg1 arg2",
 	},
 	{
@@ -220,7 +220,7 @@ arg2`,
 #syz test_5_arg_cmd arg1
 arg2
 `,
-		cmd:  "test_5_arg_cmd",
+		cmd:  cmdTest5,
 		args: "arg1 arg2",
 	},
 	{
@@ -230,7 +230,7 @@ arg2
 
  
 `,
-		cmd:  "test_5_arg_cmd",
+		cmd:  cmdTest5,
 		args: "arg1 arg2",
 	},
 	{
@@ -240,7 +240,7 @@ arg1 arg2 arg3
 arg4 arg5
  
 `,
-		cmd:  "fix:",
+		cmd:  CmdFix,
 		args: "arg1 arg2 arg3",
 	},
 	{
@@ -248,8 +248,33 @@ arg4 arg5
 #syz  fix: arg1 arg2 arg3
 arg4 arg5 
 `,
-		cmd:  "fix:",
+		cmd:  CmdFix,
 		args: "arg1 arg2 arg3",
+	},
+	{
+		body: `
+#syz dup: title goes here
+baz
+`,
+		cmd:  CmdDup,
+		args: "title goes here",
+	},
+	{
+		body: `
+#syz dup 
+title on the next line goes here  
+but not this one
+`,
+		cmd:  CmdDup,
+		args: "title on the next line goes here",
+	},
+	{
+		body: `
+#syz foo bar
+baz
+`,
+		cmd:  CmdUnknown,
+		args: "foo bar",
 	},
 }
 
@@ -295,7 +320,7 @@ To post to this group, send email to syzkaller@googlegroups.com.
 To view this discussion on the web visit https://groups.google.com/d/msgid/syzkaller/abcdef@google.com.
 For more options, visit https://groups.google.com/d/optout.`,
 			Patch:       "",
-			Command:     "fix:",
+			Command:     CmdFix,
 			CommandArgs: "arg1 arg2 arg3",
 		}},
 
@@ -316,7 +341,8 @@ last line`,
 			Cc:        []string{"bob@example.com"},
 			Body: `text body
 last line`,
-			Patch: "",
+			Patch:   "",
+			Command: CmdNone,
 		}},
 
 	{`Date: Sun, 7 May 2017 19:54:00 -0700
@@ -339,7 +365,7 @@ text body
 second line
 last line`,
 			Patch:       "",
-			Command:     "invalid",
+			Command:     CmdInvalid,
 			CommandArgs: "",
 		}},
 
@@ -364,8 +390,8 @@ second line
 last line
 #syz command`,
 			Patch:       "",
-			Command:     "command",
-			CommandArgs: "",
+			Command:     CmdUnknown,
+			CommandArgs: "command",
 		}},
 
 	{`Date: Sun, 7 May 2017 19:54:00 -0700
@@ -402,7 +428,9 @@ IHQpKSB7CiAJCXNwaW5fdW5sb2NrKCZrY292LT5sb2NrKTsKIAkJcmV0dXJuOwo=
 			Body: `body text
 >#syz test
 `,
-			Patch: `--- a/kernel/kcov.c
+			Patch: `diff --git a/kernel/kcov.c b/kernel/kcov.c
+index 85e5546cd791..949ea4574412 100644
+--- a/kernel/kcov.c
 +++ b/kernel/kcov.c
 @@ -127,7 +127,6 @@ void kcov_task_exit(struct task_struct *t)
  	kcov = t->kcov;
@@ -413,7 +441,7 @@ IHQpKSB7CiAJCXNwaW5fdW5sb2NrKCZrY292LT5sb2NrKTsKIAkJcmV0dXJuOwo=
  		spin_unlock(&kcov->lock);
  		return;
 `,
-			Command:     "",
+			Command:     CmdNone,
 			CommandArgs: "",
 		}},
 
@@ -511,7 +539,9 @@ index 3d85747bd86e..a257b872a53d 100644
   error = vfs_statx(dfd, filename, flags, &stat, mask);
   if (error)
 `,
-			Patch: `--- a/fs/stat.c
+			Patch: `diff --git a/fs/stat.c b/fs/stat.c
+index 3d85747bd86e..a257b872a53d 100644
+--- a/fs/stat.c
 +++ b/fs/stat.c
 @@ -567,8 +567,6 @@ SYSCALL_DEFINE5(statx,
   return -EINVAL;
@@ -523,8 +553,8 @@ index 3d85747bd86e..a257b872a53d 100644
   error = vfs_statx(dfd, filename, flags, &stat, mask);
   if (error)
 `,
-			Command:     "test",
-			CommandArgs: "",
+			Command:     CmdTest,
+			CommandArgs: "commit 59372bbf3abd5b24a7f6f676a3968685c280f955",
 		}},
 
 	{`Sender: syzkaller-bugs@googlegroups.com
@@ -571,7 +601,39 @@ d
 
 #syz dup: BUG: unable to handle kernel NULL pointer dereference in corrupted
 `,
-		Command:     "dup:",
+		Command:     CmdDup,
 		CommandArgs: "BUG: unable to handle kernel NULL pointer dereference in corrupted",
+	}},
+
+	{`Sender: syzkaller-bugs@googlegroups.com
+To: syzbot <syzbot+6dd701dc797b23b8c761@syzkaller.appspotmail.com>
+From: bar@foo.com
+
+#syz dup:
+BUG: unable to handle kernel NULL pointer dereference in corrupted
+`, Email{
+		From: "<bar@foo.com>",
+		Cc:   []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
+		Body: `#syz dup:
+BUG: unable to handle kernel NULL pointer dereference in corrupted
+`,
+		Command:     CmdDup,
+		CommandArgs: "BUG: unable to handle kernel NULL pointer dereference in corrupted",
+	}},
+
+	{`Sender: syzkaller-bugs@googlegroups.com
+To: syzbot <syzbot+6dd701dc797b23b8c761@syzkaller.appspotmail.com>
+From: bar@foo.com
+
+#syz fix:
+When freeing a lockf struct that already is part of a linked list, make sure to
+`, Email{
+		From: "<bar@foo.com>",
+		Cc:   []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
+		Body: `#syz fix:
+When freeing a lockf struct that already is part of a linked list, make sure to
+`,
+		Command:     CmdFix,
+		CommandArgs: "When freeing a lockf struct that already is part of a linked list, make sure to",
 	}},
 }

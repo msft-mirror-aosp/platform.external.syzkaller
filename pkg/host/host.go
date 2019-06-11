@@ -4,6 +4,7 @@
 package host
 
 import (
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -11,6 +12,7 @@ import (
 // For unsupported syscalls it also returns reason as to why it is unsupported.
 func DetectSupportedSyscalls(target *prog.Target, sandbox string) (
 	map[*prog.Syscall]bool, map[*prog.Syscall]string, error) {
+	log.Logf(1, "detecting supported syscalls")
 	supported := make(map[*prog.Syscall]bool)
 	unsupported := make(map[*prog.Syscall]string)
 	// Akaros does not have own host and parasitizes on some other OS.
@@ -21,7 +23,13 @@ func DetectSupportedSyscalls(target *prog.Target, sandbox string) (
 		return supported, unsupported, nil
 	}
 	for _, c := range target.Syscalls {
-		ok, reason := isSupported(c, sandbox)
+		ok, reason := false, ""
+		switch c.CallName {
+		case "syz_execute_func":
+			ok = true
+		default:
+			ok, reason = isSupported(c, target, sandbox)
+		}
 		if ok {
 			supported[c] = true
 		} else {
@@ -39,8 +47,10 @@ var testFallback = false
 const (
 	FeatureCoverage = iota
 	FeatureComparisons
+	FeatureExtraCoverage
 	FeatureSandboxSetuid
 	FeatureSandboxNamespace
+	FeatureSandboxAndroidUntrustedApp
 	FeatureFaultInjection
 	FeatureLeakChecking
 	FeatureNetworkInjection
@@ -58,7 +68,7 @@ type Features [numFeatures]Feature
 
 var checkFeature [numFeatures]func() string
 var setupFeature [numFeatures]func() error
-var callbFeature [numFeatures]func()
+var callbFeature [numFeatures]func(leakFrames [][]byte)
 
 func unconditionallyEnabled() string { return "" }
 
@@ -68,14 +78,16 @@ func unconditionallyEnabled() string { return "" }
 func Check(target *prog.Target) (*Features, error) {
 	const unsupported = "support is not implemented in syzkaller"
 	res := &Features{
-		FeatureCoverage:         {Name: "code coverage", Reason: unsupported},
-		FeatureComparisons:      {Name: "comparison tracing", Reason: unsupported},
-		FeatureSandboxSetuid:    {Name: "setuid sandbox", Reason: unsupported},
-		FeatureSandboxNamespace: {Name: "namespace sandbox", Reason: unsupported},
-		FeatureFaultInjection:   {Name: "fault injection", Reason: unsupported},
-		FeatureLeakChecking:     {Name: "leak checking", Reason: unsupported},
-		FeatureNetworkInjection: {Name: "net packed injection", Reason: unsupported},
-		FeatureNetworkDevices:   {Name: "net device setup", Reason: unsupported},
+		FeatureCoverage:                   {Name: "code coverage", Reason: unsupported},
+		FeatureComparisons:                {Name: "comparison tracing", Reason: unsupported},
+		FeatureExtraCoverage:              {Name: "extra coverage", Reason: unsupported},
+		FeatureSandboxSetuid:              {Name: "setuid sandbox", Reason: unsupported},
+		FeatureSandboxNamespace:           {Name: "namespace sandbox", Reason: unsupported},
+		FeatureSandboxAndroidUntrustedApp: {Name: "Android sandbox", Reason: unsupported},
+		FeatureFaultInjection:             {Name: "fault injection", Reason: unsupported},
+		FeatureLeakChecking:               {Name: "leak checking", Reason: unsupported},
+		FeatureNetworkInjection:           {Name: "net packet injection", Reason: unsupported},
+		FeatureNetworkDevices:             {Name: "net device setup", Reason: unsupported},
 	}
 	if target.OS == "akaros" || target.OS == "test" {
 		return res, nil
@@ -96,11 +108,11 @@ func Check(target *prog.Target) (*Features, error) {
 
 // Setup enables and does any one-time setup for the requested features on the host.
 // Note: this can be called multiple times and must be idempotent.
-func Setup(target *prog.Target, features *Features) (func(), error) {
+func Setup(target *prog.Target, features *Features) (func(leakFrames [][]byte), error) {
 	if target.OS == "akaros" || target.OS == "test" {
 		return nil, nil
 	}
-	var callback func()
+	var callback func([][]byte)
 	for n, setup := range setupFeature {
 		if setup == nil || !features[n].Enabled {
 			continue
@@ -109,15 +121,15 @@ func Setup(target *prog.Target, features *Features) (func(), error) {
 			return nil, err
 		}
 		cb := callbFeature[n]
-		if cb != nil {
-			prev := callback
-			callback = func() {
-				cb()
-				if prev != nil {
-					prev()
-				}
+		if cb == nil {
+			continue
+		}
+		prev := callback
+		callback = func(leakFrames [][]byte) {
+			cb(leakFrames)
+			if prev != nil {
+				prev(leakFrames)
 			}
-
 		}
 	}
 	return callback, nil

@@ -18,11 +18,12 @@ type typeDesc struct {
 	CantBeOpt    bool       // can't be marked as opt?
 	NeedBase     bool       // needs base type when used as field?
 	AllowColon   bool       // allow colon (int8:2) on fields?
-	ResourceBase bool       // can be resource base type?
 	OptArgs      int        // number of optional arguments in Args array
 	Args         []namedArg // type arguments
 	// CanBeArgRet returns if this type can be syscall argument/return (false if nil).
 	CanBeArgRet func(comp *compiler, t *ast.Type) (bool, bool)
+	// CanBeResourceBase returns if this type can be a resource base type (false if nil.
+	CanBeResourceBase func(comp *compiler, t *ast.Type) bool
 	// Check does custom verification of the type (optional, consts are not patched yet).
 	Check func(comp *compiler, t *ast.Type, args []*ast.Type, base prog.IntTypeCommon)
 	// CheckConsts does custom verification of the type (optional, consts are patched).
@@ -67,9 +68,16 @@ var typeInt = &typeDesc{
 	CanBeArgRet:  canBeArg,
 	CanBeTypedef: true,
 	AllowColon:   true,
-	ResourceBase: true,
 	OptArgs:      1,
 	Args:         []namedArg{{Name: "range", Type: typeArgIntRange}},
+	CanBeResourceBase: func(comp *compiler, t *ast.Type) bool {
+		// Big-endian resources can always be converted to non-big-endian,
+		// since we will always revert bytes during copyout and during copyin,
+		// so the result is the same as not reverting at all.
+		// Big-endian resources are also not implemented and don't have tests.
+		_, be := comp.parseIntType(t.Ident)
+		return !be
+	},
 	Check: func(comp *compiler, t *ast.Type, args []*ast.Type, base prog.IntTypeCommon) {
 		typeArgBase.Type.Check(comp, t)
 	},
@@ -288,7 +296,7 @@ var typeFileoff = &typeDesc{
 }
 
 var typeVMA = &typeDesc{
-	Names:       []string{"vma"},
+	Names:       []string{"vma", "vma64"},
 	CanBeArgRet: canBeArg,
 	OptArgs:     1,
 	Args:        []namedArg{{Name: "size range", Type: typeArgSizeRange}},
@@ -298,6 +306,9 @@ var typeVMA = &typeDesc{
 			begin, end = args[0].Value, args[0].Value2
 		}
 		base.TypeSize = comp.ptrSize
+		if t.Ident == "vma64" {
+			base.TypeSize = 8
+		}
 		return &prog.VmaType{
 			TypeCommon: base.TypeCommon,
 			RangeBegin: begin,
@@ -407,11 +418,13 @@ var typeText = &typeDesc{
 
 var typeArgTextType = &typeArg{
 	Kind:  kindIdent,
-	Names: []string{"x86_real", "x86_16", "x86_32", "x86_64", "arm64"},
+	Names: []string{"target", "x86_real", "x86_16", "x86_32", "x86_64", "arm64"},
 }
 
 func genTextType(t *ast.Type) prog.TextKind {
 	switch t.Ident {
+	case "target":
+		return prog.TextTarget
 	case "x86_real":
 		return prog.TextX86Real
 	case "x86_16":
@@ -425,25 +438,6 @@ func genTextType(t *ast.Type) prog.TextKind {
 	default:
 		panic(fmt.Sprintf("unknown text type %q", t.Ident))
 	}
-}
-
-var typeBuffer = &typeDesc{
-	Names:       []string{"buffer"},
-	CanBeArgRet: canBeArg,
-	Args:        []namedArg{{Name: "direction", Type: typeArgDir}},
-	Gen: func(comp *compiler, t *ast.Type, args []*ast.Type, base prog.IntTypeCommon) prog.Type {
-		base.TypeSize = comp.ptrSize
-		common := genCommon("", "", 0, genDir(args[0]), false)
-		// BufferBlobRand is always varlen.
-		common.IsVarlen = true
-		return &prog.PtrType{
-			TypeCommon: base.TypeCommon,
-			Type: &prog.BufferType{
-				TypeCommon: common,
-				Kind:       prog.BufferBlobRand,
-			},
-		}
-	},
 }
 
 const (
@@ -648,8 +642,10 @@ var typeArgType = &typeArg{}
 
 var typeResource = &typeDesc{
 	// No Names, but getTypeDesc knows how to match it.
-	CanBeArgRet:  canBeArgRet,
-	ResourceBase: true,
+	CanBeArgRet: canBeArgRet,
+	CanBeResourceBase: func(comp *compiler, t *ast.Type) bool {
+		return true
+	},
 	// Gen is assigned below to avoid initialization loop.
 }
 
@@ -687,7 +683,7 @@ func init() {
 		canBeArg := true
 		for _, fld := range s.Fields {
 			desc := comp.getTypeDesc(fld.Type)
-			if desc == nil || desc.CanBeArgRet == nil {
+			if desc == nil || desc == typeStruct || desc.CanBeArgRet == nil {
 				return false, false
 			}
 			canBeArg1, _ := desc.CanBeArgRet(comp, fld.Type)
@@ -847,6 +843,8 @@ type boolptr intptr[0:1]
 type filename string[filename]
 filename = "", "."
 
+type buffer[DIR] ptr[DIR, array[int8]]
+
 type optional[T] [
 	val	T
 	void	void
@@ -867,7 +865,6 @@ func init() {
 		typeCsum,
 		typeProc,
 		typeText,
-		typeBuffer,
 		typeString,
 		typeFmt,
 	}

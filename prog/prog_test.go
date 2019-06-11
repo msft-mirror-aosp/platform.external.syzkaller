@@ -5,12 +5,10 @@ package prog
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestGeneration(t *testing.T) {
@@ -24,7 +22,7 @@ func TestDefault(t *testing.T) {
 	target, _, _ := initTest(t)
 	for _, meta := range target.Syscalls {
 		ForeachType(meta, func(typ Type) {
-			arg := typ.makeDefaultArg()
+			arg := typ.DefaultArg()
 			if !isDefault(arg) {
 				t.Errorf("default arg is not default: %s\ntype: %#v\narg: %#v",
 					typ, typ, arg)
@@ -38,7 +36,7 @@ func TestDefaultCallArgs(t *testing.T) {
 	for _, meta := range target.SyscallMap {
 		// Ensure that we can restore all arguments of all calls.
 		prog := fmt.Sprintf("%v()", meta.Name)
-		p, err := target.Deserialize([]byte(prog))
+		p, err := target.Deserialize([]byte(prog), NonStrict)
 		if err != nil {
 			t.Fatalf("failed to restore default args in prog %q: %v", prog, err)
 		}
@@ -53,7 +51,7 @@ func TestSerialize(t *testing.T) {
 	for i := 0; i < iters; i++ {
 		p := target.Generate(rs, 10, nil)
 		data := p.Serialize()
-		p1, err := target.Deserialize(data)
+		p1, err := target.Deserialize(data, NonStrict)
 		if err != nil {
 			t.Fatalf("failed to deserialize program: %v\n%s", err, data)
 		}
@@ -145,9 +143,7 @@ func TestCrossTarget(t *testing.T) {
 }
 
 func testCrossTarget(t *testing.T, target *Target, crossTargets []*Target) {
-	seed := int64(time.Now().UnixNano())
-	t.Logf("seed=%v", seed)
-	rs := rand.NewSource(seed)
+	rs := randSource(t)
 	iters := 100
 	if testing.Short() {
 		iters /= 10
@@ -155,7 +151,7 @@ func testCrossTarget(t *testing.T, target *Target, crossTargets []*Target) {
 	for i := 0; i < iters; i++ {
 		p := target.Generate(rs, 20, nil)
 		testCrossArchProg(t, p, crossTargets)
-		p, err := target.Deserialize(p.Serialize())
+		p, err := target.Deserialize(p.Serialize(), NonStrict)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -172,7 +168,7 @@ func testCrossTarget(t *testing.T, target *Target, crossTargets []*Target) {
 func testCrossArchProg(t *testing.T, p *Prog, crossTargets []*Target) {
 	serialized := p.Serialize()
 	for _, crossTarget := range crossTargets {
-		_, err := crossTarget.Deserialize(serialized)
+		_, err := crossTarget.Deserialize(serialized, NonStrict)
 		if err == nil || strings.Contains(err.Error(), "unknown syscall") {
 			continue
 		}
@@ -223,24 +219,185 @@ func TestEscapingPaths(t *testing.T) {
 		"file/../../file":        true,
 		"../file":                true,
 		"./file/../../file/file": true,
-		"":          false,
-		".":         false,
-		"file":      false,
-		"./file":    false,
-		"./file/..": false,
+		"":                       false,
+		".":                      false,
+		"file":                   false,
+		"./file":                 false,
+		"./file/..":              false,
+	}
+	for path, want := range paths {
+		got := escapingFilename(path)
+		if got != want {
+			t.Errorf("path %q: got %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestFallbackSignal(t *testing.T) {
+	type desc struct {
+		prog string
+		info []CallInfo
+	}
+	tests := []desc{
+		// Test restored errno values and that non-executed syscalls don't get fallback signal.
+		{
+			`
+fallback$0()
+fallback$0()
+fallback$0()
+`,
+			[]CallInfo{
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  42,
+					Signal: make([]uint32, 1),
+				},
+				{},
+			},
+		},
+		// Test different cases of argument-dependent signal and that unsuccessful calls don't get it.
+		{
+			`
+r0 = fallback$0()
+fallback$1(r0)
+fallback$1(r0)
+fallback$1(0xffffffffffffffff)
+fallback$1(0x0)
+fallback$1(0x0)
+`,
+			[]CallInfo{
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  1,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 2),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 2),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  2,
+					Signal: make([]uint32, 1),
+				},
+			},
+		},
+		// Test that calls get no signal after a successful seccomp.
+		{
+			`
+fallback$0()
+fallback$0()
+seccomp()
+fallback$0()
+seccomp()
+fallback$0()
+fallback$0()
+`,
+			[]CallInfo{
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  1,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags:  CallExecuted,
+					Errno:  0,
+					Signal: make([]uint32, 1),
+				},
+				{
+					Flags: CallExecuted,
+				},
+				{
+					Flags: CallExecuted,
+				},
+			},
+		},
 	}
 	target, err := GetTarget("test", "64")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for path, escaping := range paths {
-		text := fmt.Sprintf("mutate5(&(0x7f0000000000)=\"%s\", 0x0)", hex.EncodeToString([]byte(path)))
-		_, err := target.Deserialize([]byte(text))
-		if !escaping && err != nil {
-			t.Errorf("path %q is detected as escaping (%v)", path, err)
-		}
-		if escaping && (err == nil || !strings.Contains(err.Error(), "sandbox escaping file")) {
-			t.Errorf("path %q is not detected as escaping (%v)", path, err)
-		}
+	for i, test := range tests {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			p, err := target.Deserialize([]byte(test.prog), Strict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Calls) != len(test.info) {
+				t.Fatalf("call=%v info=%v", len(p.Calls), len(test.info))
+			}
+			wantSignal := make([]int, len(test.info))
+			for i := range test.info {
+				wantSignal[i] = len(test.info[i].Signal)
+				test.info[i].Signal = nil
+			}
+			p.FallbackSignal(test.info)
+			for i := range test.info {
+				if len(test.info[i].Signal) != wantSignal[i] {
+					t.Errorf("call %v: signal=%v want=%v", i, len(test.info[i].Signal), wantSignal[i])
+				}
+				for _, sig := range test.info[i].Signal {
+					call, errno := DecodeFallbackSignal(sig)
+					if call != p.Calls[i].Meta.ID {
+						t.Errorf("call %v: sig=%x id=%v want=%v", i, sig, call, p.Calls[i].Meta.ID)
+					}
+					if errno != test.info[i].Errno {
+						t.Errorf("call %v: sig=%x errno=%v want=%v", i, sig, errno, test.info[i].Errno)
+					}
+				}
+			}
+		})
 	}
+}
+
+func TestSanitizeRandom(t *testing.T) {
+	testEachTargetRandom(t, func(t *testing.T, target *Target, rs rand.Source, iters int) {
+		for i := 0; i < iters; i++ {
+			p := target.Generate(rs, 10, nil)
+			s0 := string(p.Serialize())
+			for _, c := range p.Calls {
+				target.SanitizeCall(c)
+			}
+			s1 := string(p.Serialize())
+			if s0 != s1 {
+				t.Fatalf("non-sanitized program or non-idempotent sanitize\nwas: %v\ngot: %v", s0, s1)
+			}
+		}
+	})
 }

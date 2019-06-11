@@ -44,6 +44,9 @@ type Target struct {
 	// Used as fallback when string type does not have own dictionary.
 	StringDictionary []string
 
+	// Additional special invalid pointer values besides NULL to use.
+	SpecialPointers []uint64
+
 	// Filled by prog package:
 	init        sync.Once
 	initArch    func(target *Target)
@@ -54,6 +57,8 @@ type Target struct {
 	resourceCtors map[string][]*Syscall
 	any           anyTypes
 }
+
+const maxSpecialPointers = 16
 
 var targets = make(map[string]*Target)
 
@@ -67,6 +72,9 @@ func RegisterTarget(target *Target, initArch func(target *Target)) {
 }
 
 func GetTarget(OS, arch string) (*Target, error) {
+	if OS == "android" {
+		OS = "linux"
+	}
 	key := OS + "/" + arch
 	target := targets[key]
 	if target == nil {
@@ -101,6 +109,15 @@ func (target *Target) lazyInit() {
 	target.initTarget()
 	target.initArch(target)
 	target.ConstMap = nil // currently used only by initArch
+	// Give these 2 known addresses fixed positions and prepend target-specific ones at the end.
+	target.SpecialPointers = append([]uint64{
+		0x0000000000000000, // NULL pointer (keep this first because code uses special index=0 as NULL)
+		0xffffffffffffffff, // unmapped kernel address (keep second because serialized value will match actual pointer value)
+		0x9999999999999999, // non-canonical address
+	}, target.SpecialPointers...)
+	if len(target.SpecialPointers) > maxSpecialPointers {
+		panic("too many special pointers")
+	}
 }
 
 func (target *Target) initTarget() {
@@ -152,6 +169,17 @@ func (target *Target) initTarget() {
 	initAnyTypes(target)
 }
 
+func (target *Target) GetConst(name string) uint64 {
+	if target.ConstMap == nil {
+		panic("GetConst can only be used during target initialization")
+	}
+	v, ok := target.ConstMap[name]
+	if !ok {
+		panic(fmt.Sprintf("const %v is not defined for %v/%v", name, target.OS, target.Arch))
+	}
+	return v
+}
+
 type Gen struct {
 	r *randGen
 	s *state
@@ -184,7 +212,7 @@ func (g *Gen) GenerateSpecialArg(typ Type, pcalls *[]*Call) Arg {
 func (g *Gen) generateArg(typ Type, pcalls *[]*Call, ignoreSpecial bool) Arg {
 	arg, calls := g.r.generateArgImpl(g.s, typ, ignoreSpecial)
 	*pcalls = append(*pcalls, calls...)
-	g.r.target.assignSizesArray([]Arg{arg})
+	g.r.target.assignSizesArray([]Arg{arg}, nil)
 	return arg
 }
 
@@ -207,4 +235,49 @@ func (g *Gen) MutateArg(arg0 Arg) (calls []*Call) {
 		calls = append(calls, newCalls...)
 	}
 	return calls
+}
+
+type Builder struct {
+	target *Target
+	ma     *memAlloc
+	p      *Prog
+}
+
+func MakeProgGen(target *Target) *Builder {
+	return &Builder{
+		target: target,
+		ma:     newMemAlloc(target.NumPages * target.PageSize),
+		p: &Prog{
+			Target: target,
+		},
+	}
+}
+
+func (pg *Builder) Append(c *Call) error {
+	pg.target.assignSizesCall(c)
+	pg.target.SanitizeCall(c)
+	pg.p.Calls = append(pg.p.Calls, c)
+	return nil
+}
+
+func (pg *Builder) Allocate(size uint64) uint64 {
+	return pg.ma.alloc(nil, size)
+}
+
+func (pg *Builder) AllocateVMA(npages uint64) uint64 {
+	psize := pg.target.PageSize
+	addr := pg.ma.alloc(nil, (npages+1)*psize)
+	return (addr + psize - 1) & ^(psize - 1)
+}
+
+func (pg *Builder) Finalize() (*Prog, error) {
+	if err := pg.p.validate(); err != nil {
+		return nil, err
+	}
+	if _, err := pg.p.SerializeForExec(make([]byte, ExecBufferSize)); err != nil {
+		return nil, err
+	}
+	p := pg.p
+	pg.p = nil
+	return p, nil
 }
