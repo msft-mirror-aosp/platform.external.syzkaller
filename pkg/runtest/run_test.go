@@ -17,6 +17,10 @@ import (
 )
 
 func Test(t *testing.T) {
+	switch runtime.GOOS {
+	case "openbsd":
+		t.Skipf("broken on %v", runtime.GOOS)
+	}
 	for _, sysTarget := range targets.List["test"] {
 		sysTarget1 := targets.Get(sysTarget.OS, sysTarget.Arch)
 		t.Run(sysTarget1.Arch, func(t *testing.T) {
@@ -69,6 +73,7 @@ func test(t *testing.T, sysTarget *targets.Target) {
 			t.Helper()
 			t.Logf(text)
 		},
+		Verbose: true,
 	}
 	if err := ctx.Run(); err != nil {
 		t.Fatal(err)
