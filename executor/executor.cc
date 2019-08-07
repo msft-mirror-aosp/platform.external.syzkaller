@@ -113,12 +113,10 @@ static bool flag_debug;
 static bool flag_cover;
 static sandbox_type flag_sandbox;
 static bool flag_extra_cover;
-static bool flag_enable_fault_injection;
 static bool flag_enable_tun;
 static bool flag_enable_net_dev;
 static bool flag_enable_net_reset;
 static bool flag_enable_cgroups;
-static bool flag_enable_binfmt_misc;
 static bool flag_enable_close_fds;
 
 static bool flag_collect_cover;
@@ -172,7 +170,7 @@ static const uint64 arg_csum_inet = 0;
 static const uint64 arg_csum_chunk_data = 0;
 static const uint64 arg_csum_chunk_const = 1;
 
-typedef long(SYSCALLAPI* syscall_t)(long, long, long, long, long, long, long, long, long);
+typedef intptr_t(SYSCALLAPI* syscall_t)(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
 
 struct call_t {
 	const char* name;
@@ -199,11 +197,12 @@ struct thread_t {
 	int call_index;
 	int call_num;
 	int num_args;
-	long args[kMaxArgs];
-	long res;
+	intptr_t args[kMaxArgs];
+	intptr_t res;
 	uint32 reserrno;
 	bool fault_injected;
 	cover_t cov;
+	bool extra_cover;
 };
 
 static thread_t threads[kMaxThreads];
@@ -287,7 +286,12 @@ struct kcov_comparison_t {
 	bool operator<(const struct kcov_comparison_t& other) const;
 };
 
-static thread_t* schedule_call(int call_index, int call_num, bool colliding, uint64 copyout_index, uint64 num_args, uint64* args, uint64* pos);
+struct feature_t {
+	const char* name;
+	void (*setup)();
+};
+
+static thread_t* schedule_call(int call_index, int call_num, bool colliding, uint64 copyout_index, uint64 num_args, uint64* args, uint64* pos, bool extra_cover);
 static void handle_completion(thread_t* th);
 static void copyout_call_results(thread_t* th);
 static void write_call_output(thread_t* th, bool finished);
@@ -303,6 +307,7 @@ static uint64 swap(uint64 v, uint64 size, uint64 bf);
 static void copyin(char* addr, uint64 val, uint64 size, uint64 bf, uint64 bf_off, uint64 bf_len);
 static bool copyout(char* addr, uint64 size, uint64* res);
 static void setup_control_pipes();
+static void setup_features(char** enable, int n);
 
 #include "syscalls.h"
 
@@ -328,6 +333,18 @@ int main(int argc, char** argv)
 {
 	if (argc == 2 && strcmp(argv[1], "version") == 0) {
 		puts(GOOS " " GOARCH " " SYZ_REVISION " " GIT_REVISION);
+		return 0;
+	}
+	if (argc >= 2 && strcmp(argv[1], "setup") == 0) {
+		setup_features(argv + 2, argc - 2);
+		return 0;
+	}
+	if (argc >= 2 && strcmp(argv[1], "leak") == 0) {
+#if SYZ_HAVE_LEAK_CHECK
+		check_leaks(argv + 2, argc - 2);
+#else
+		fail("leak checking is not implemented");
+#endif
 		return 0;
 	}
 	if (argc == 2 && strcmp(argv[1], "test") == 0)
@@ -371,8 +388,10 @@ int main(int argc, char** argv)
 		for (int i = 0; i < kMaxThreads; i++) {
 			threads[i].cov.fd = kCoverFd + i;
 			cover_open(&threads[i].cov, false);
+			cover_protect(&threads[i].cov);
 		}
 		cover_open(&extra_cov, true);
+		cover_protect(&extra_cov);
 		if (flag_extra_cover) {
 			// Don't enable comps because we don't use them in the fuzzer yet.
 			cover_enable(&extra_cov, false, true);
@@ -449,13 +468,11 @@ void parse_env_flags(uint64 flags)
 	else if (flags & (1 << 4))
 		flag_sandbox = sandbox_android_untrusted_app;
 	flag_extra_cover = flags & (1 << 5);
-	flag_enable_fault_injection = flags & (1 << 6);
-	flag_enable_tun = flags & (1 << 7);
-	flag_enable_net_dev = flags & (1 << 8);
-	flag_enable_net_reset = flags & (1 << 9);
-	flag_enable_cgroups = flags & (1 << 10);
-	flag_enable_binfmt_misc = flags & (1 << 11);
-	flag_enable_close_fds = flags & (1 << 12);
+	flag_enable_tun = flags & (1 << 6);
+	flag_enable_net_dev = flags & (1 << 7);
+	flag_enable_net_reset = flags & (1 << 8);
+	flag_enable_cgroups = flags & (1 << 9);
+	flag_enable_close_fds = flags & (1 << 10);
 }
 
 #if SYZ_EXECUTOR_USES_FORK_SERVER
@@ -572,21 +589,32 @@ retry:
 	}
 
 	int call_index = 0;
-	bool collect_extra_cover = false;
+	bool prog_extra_cover = false;
 	int prog_extra_timeout = 0;
 	for (;;) {
 		uint64 call_num = read_input(&input_pos);
 		if (call_num == instr_eof)
 			break;
+		bool call_extra_cover = false;
+		// call_extra_timeout must match timeout in pkg/csource/csource.go.
 		int call_extra_timeout = 0;
-		if (strcmp(syscalls[call_num].name, "syz_usb_connect") == 0) {
-			collect_extra_cover = true;
+		// TODO: find a way to tune timeout values.
+		if (strncmp(syscalls[call_num].name, "syz_usb", strlen("syz_usb")) == 0) {
+			prog_extra_cover = true;
+			call_extra_cover = true;
+		}
+		if (strncmp(syscalls[call_num].name, "syz_usb_connect", strlen("syz_usb_connect")) == 0) {
 			prog_extra_timeout = 2000;
 			call_extra_timeout = 2000;
 		}
-		if (strcmp(syscalls[call_num].name, "syz_usb_disconnect") == 0) {
-			call_extra_timeout = 200;
-		}
+		if (strncmp(syscalls[call_num].name, "syz_usb_control_io", strlen("syz_usb_control_io")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_usb_ep_write", strlen("syz_usb_ep_write")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_usb_ep_read", strlen("syz_usb_ep_read")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_usb_disconnect", strlen("syz_usb_disconnect")) == 0)
+			call_extra_timeout = 300;
 		if (call_num == instr_copyin) {
 			char* addr = (char*)read_input(&input_pos);
 			uint64 typ = read_input(&input_pos);
@@ -687,7 +715,7 @@ retry:
 		for (uint64 i = num_args; i < kMaxArgs; i++)
 			args[i] = 0;
 		thread_t* th = schedule_call(call_index++, call_num, colliding, copyout_index,
-					     num_args, args, input_pos);
+					     num_args, args, input_pos, call_extra_cover);
 
 		if (colliding && (call_index % 2) == 0) {
 			// Don't wait for every other call.
@@ -700,6 +728,7 @@ retry:
 				timeout_ms = 1000;
 			if (event_timedwait(&th->done, timeout_ms))
 				handle_completion(th);
+
 			// Check if any of previous calls have completed.
 			for (int i = 0; i < kMaxThreads; i++) {
 				th = &threads[i];
@@ -744,7 +773,8 @@ retry:
 					write_call_output(th, false);
 				}
 			}
-			write_extra_output();
+			if (prog_extra_cover)
+				write_extra_output();
 		}
 	}
 
@@ -752,9 +782,10 @@ retry:
 	close_fds();
 #endif
 
-	if (!colliding && !collide && collect_extra_cover) {
+	if (prog_extra_cover) {
 		sleep_ms(500);
-		write_extra_output();
+		if (!colliding && !collide)
+			write_extra_output();
 	}
 
 	if (flag_collide && !flag_inject_fault && !colliding && !collide) {
@@ -764,7 +795,7 @@ retry:
 	}
 }
 
-thread_t* schedule_call(int call_index, int call_num, bool colliding, uint64 copyout_index, uint64 num_args, uint64* args, uint64* pos)
+thread_t* schedule_call(int call_index, int call_num, bool colliding, uint64 copyout_index, uint64 num_args, uint64* args, uint64* pos, bool extra_cover)
 {
 	// Find a spare thread to execute the call.
 	int i;
@@ -795,6 +826,7 @@ thread_t* schedule_call(int call_index, int call_num, bool colliding, uint64 cop
 	th->num_args = num_args;
 	for (int i = 0; i < kMaxArgs; i++)
 		th->args[i] = args[i];
+	th->extra_cover = extra_cover;
 	event_set(&th->ready);
 	running++;
 	return th;
@@ -831,8 +863,10 @@ void write_coverage_signal(cover_t* cov, uint32* signal_count_pos, uint32* cover
 	uint32 cover_size = cov->size;
 	if (flag_dedup_cover) {
 		cover_data_t* end = cover_data + cover_size;
+		cover_unprotect(cov);
 		std::sort(cover_data, end);
 		cover_size = std::unique(cover_data, end) - cover_data;
+		cover_protect(cov);
 	}
 	// Truncate PCs to uint32 assuming that they fit into 32-bits.
 	// True for x86_64 and arm64 without KASLR.
@@ -847,11 +881,12 @@ void handle_completion(thread_t* th)
 	if (event_isset(&th->ready) || !event_isset(&th->done) || !th->executing)
 		fail("bad thread state in completion: ready=%d done=%d executing=%d",
 		     event_isset(&th->ready), event_isset(&th->done), th->executing);
-	if (th->res != (long)-1)
+	if (th->res != (intptr_t)-1)
 		copyout_call_results(th);
 	if (!collide && !th->colliding) {
 		write_call_output(th, true);
-		write_extra_output();
+		if (th->extra_cover)
+			write_extra_output();
 	}
 	th->executing = false;
 	running--;
@@ -917,8 +952,10 @@ void write_call_output(thread_t* th, bool finished)
 		kcov_comparison_t* end = start + ncomps;
 		if ((char*)end > th->cov.data_end)
 			fail("too many comparisons %u", ncomps);
+		cover_unprotect(&th->cov);
 		std::sort(start, end);
 		ncomps = std::unique(start, end) - start;
+		cover_protect(&th->cov);
 		uint32 comps_size = 0;
 		for (uint32 i = 0; i < ncomps; ++i) {
 			if (start[i].ignore())
@@ -1019,7 +1056,7 @@ void execute_call(thread_t* th)
 	for (int i = 0; i < th->num_args; i++) {
 		if (i != 0)
 			debug(", ");
-		debug("0x%lx", th->args[i]);
+		debug("0x%llx", (uint64)th->args[i]);
 	}
 	debug(")\n");
 
@@ -1048,8 +1085,8 @@ void execute_call(thread_t* th)
 		th->fault_injected = fault_injected(fail_fd);
 	}
 
-	debug("#%d [%llums] <- %s=0x%lx errno=%d ",
-	      th->id, current_time_ms() - start_time_ms, call->name, th->res, th->reserrno);
+	debug("#%d [%llums] <- %s=0x%llx errno=%d ",
+	      th->id, current_time_ms() - start_time_ms, call->name, (uint64)th->res, th->reserrno);
 	if (flag_cover)
 		debug("cover=%u ", th->cov.size);
 	if (flag_inject_fault && th->call_index == flag_fault_call)
@@ -1359,6 +1396,26 @@ bool kcov_comparison_t::operator<(const struct kcov_comparison_t& other) const
 }
 #endif
 
+void setup_features(char** enable, int n)
+{
+	// This does any one-time setup for the requested features on the machine.
+	// Note: this can be called multiple times and must be idempotent.
+	for (int i = 0; i < n; i++) {
+		bool found = false;
+#if SYZ_HAVE_FEATURES
+		for (unsigned f = 0; f < sizeof(features) / sizeof(features[0]); f++) {
+			if (strcmp(enable[i], features[f].name) == 0) {
+				features[f].setup();
+				found = true;
+				break;
+			}
+		}
+#endif
+		if (!found)
+			fail("unknown feature %s", enable[i]);
+	}
+}
+
 void fail(const char* msg, ...)
 {
 	int e = errno;
@@ -1396,10 +1453,12 @@ void debug_dump_data(const char* data, int length)
 {
 	if (!flag_debug)
 		return;
-	for (int i = 0; i < length; i++) {
+	int i;
+	for (i = 0; i < length; i++) {
 		debug("%02x ", data[i] & 0xff);
 		if (i % 16 == 15)
 			debug("\n");
 	}
-	debug("\n");
+	if (i % 16 != 0)
+		debug("\n");
 }

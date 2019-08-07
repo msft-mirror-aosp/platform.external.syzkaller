@@ -154,6 +154,7 @@ var (
 	kallsymsRenameMap  = map[string]string{
 		"umount":  "oldumount",
 		"umount2": "umount",
+		"stat":    "newstat",
 	}
 	trialMu         sync.Mutex
 	trialSupported  = make(map[uint64]bool)
@@ -176,6 +177,18 @@ func isSupportedSyzkall(sandbox string, c *prog.Syscall) (bool, string) {
 		fname, ok := extractStringConst(c.Args[0])
 		if !ok {
 			panic("first open arg is not a pointer to string const")
+		}
+		if checkUSBInjection() == "" {
+			// These entries might not be available at boot time,
+			// but will be created by connected USB devices.
+			USBDevicePrefixes := []string{
+				"/dev/hidraw", "/dev/usb/hiddev", "/dev/input/",
+			}
+			for _, prefix := range USBDevicePrefixes {
+				if strings.HasPrefix(fname, prefix) {
+					return true, ""
+				}
+			}
 		}
 		var check func(dev string) bool
 		check = func(dev string) bool {
@@ -201,7 +214,7 @@ func isSupportedSyzkall(sandbox string, c *prog.Syscall) (bool, string) {
 	case "syz_emit_ethernet", "syz_extract_tcp_res":
 		reason := checkNetworkInjection()
 		return reason == "", reason
-	case "syz_usb_connect", "syz_usb_disconnect", "syz_usb_control_io", "syz_usb_ep_write":
+	case "syz_usb_connect", "syz_usb_disconnect", "syz_usb_control_io", "syz_usb_ep_write", "syz_usb_ep_read":
 		reason := checkUSBInjection()
 		return reason == "", reason
 	case "syz_kvm_setup_cpu":
@@ -299,18 +312,32 @@ func isSupportedSocket(c *prog.Syscall) (bool, string) {
 }
 
 func isSupportedOpenAt(c *prog.Syscall) (bool, string) {
+	var fd int
+	var err error
+
 	fname, ok := extractStringConst(c.Args[1])
 	if !ok || len(fname) == 0 || fname[0] != '/' {
 		return true, ""
 	}
-	fd, err := syscall.Open(fname, syscall.O_RDONLY, 0)
-	if fd != -1 {
-		syscall.Close(fd)
+
+	modes := []int{syscall.O_RDONLY, syscall.O_WRONLY, syscall.O_RDWR}
+
+	// Attempt to extract flags from the syscall description
+	if mode, ok := c.Args[2].(*prog.ConstType); ok {
+		modes = []int{int(mode.Val)}
 	}
-	if err != nil {
-		return false, fmt.Sprintf("open(%v) failed: %v", fname, err)
+
+	for _, mode := range modes {
+		fd, err = syscall.Open(fname, mode, 0)
+		if fd != -1 {
+			syscall.Close(fd)
+		}
+		if err == nil {
+			return true, ""
+		}
 	}
-	return true, ""
+
+	return false, fmt.Sprintf("open(%v) failed: %v", fname, err)
 }
 
 func isSupportedMount(c *prog.Syscall, sandbox string) (bool, string) {
@@ -366,10 +393,7 @@ func init() {
 	checkFeature[FeatureSandboxNamespace] = checkSandboxNamespace
 	checkFeature[FeatureSandboxAndroidUntrustedApp] = checkSandboxAndroidUntrustedApp
 	checkFeature[FeatureFaultInjection] = checkFaultInjection
-	setupFeature[FeatureFaultInjection] = setupFaultInjection
 	checkFeature[FeatureLeakChecking] = checkLeakChecking
-	setupFeature[FeatureLeakChecking] = setupLeakChecking
-	callbFeature[FeatureLeakChecking] = callbackLeakChecking
 	checkFeature[FeatureNetworkInjection] = checkNetworkInjection
 	checkFeature[FeatureNetworkDevices] = checkNetworkDevices
 }
@@ -481,28 +505,6 @@ func checkFaultInjection() string {
 	return ""
 }
 
-func setupFaultInjection() error {
-	// Note: these files are also hardcoded in pkg/csource/csource.go.
-	if err := osutil.WriteFile("/sys/kernel/debug/failslab/ignore-gfp-wait", []byte("N")); err != nil {
-		return fmt.Errorf("failed to write /failslab/ignore-gfp-wait: %v", err)
-	}
-	// These are enabled by separate configs (e.g. CONFIG_FAIL_FUTEX)
-	// and we did not check all of them in checkFaultInjection, so we ignore errors.
-	if err := osutil.WriteFile("/sys/kernel/debug/fail_futex/ignore-private", []byte("N")); err != nil {
-		log.Logf(0, "failed to write /sys/kernel/debug/fail_futex/ignore-private: %v", err)
-	}
-	if err := osutil.WriteFile("/sys/kernel/debug/fail_page_alloc/ignore-gfp-highmem", []byte("N")); err != nil {
-		log.Logf(0, "failed to write /sys/kernel/debug/fail_page_alloc/ignore-gfp-highmem: %v", err)
-	}
-	if err := osutil.WriteFile("/sys/kernel/debug/fail_page_alloc/ignore-gfp-wait", []byte("N")); err != nil {
-		log.Logf(0, "failed to write /sys/kernel/debug/fail_page_alloc/ignore-gfp-wait: %v", err)
-	}
-	if err := osutil.WriteFile("/sys/kernel/debug/fail_page_alloc/min-order", []byte("0")); err != nil {
-		log.Logf(0, "failed to write /sys/kernel/debug/fail_page_alloc/min-order: %v", err)
-	}
-	return nil
-}
-
 func checkLeakChecking() string {
 	if reason := checkDebugFS(); reason != "" {
 		return reason
@@ -519,101 +521,6 @@ func checkLeakChecking() string {
 		return fmt.Sprintf("/sys/kernel/debug/kmemleak write failed: %v", err)
 	}
 	return ""
-}
-
-func setupLeakChecking() error {
-	fd, err := syscall.Open("/sys/kernel/debug/kmemleak", syscall.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("failed to open /sys/kernel/debug/kmemleak: %v", err)
-	}
-	defer syscall.Close(fd)
-	// Flush boot leaks.
-	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
-		return fmt.Errorf("write(kmemleak, scan) failed: %v", err)
-	}
-	time.Sleep(5 * time.Second) // account for MSECS_MIN_AGE
-	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
-		return fmt.Errorf("write(kmemleak, scan) failed: %v", err)
-	}
-	if _, err := syscall.Write(fd, []byte("clear")); err != nil {
-		return fmt.Errorf("write(kmemleak, clear) failed: %v", err)
-	}
-	return nil
-}
-
-func callbackLeakChecking(leakFrames [][]byte) {
-	start := time.Now()
-	fd, err := syscall.Open("/sys/kernel/debug/kmemleak", syscall.O_RDWR, 0)
-	if err != nil {
-		panic(err)
-	}
-	defer syscall.Close(fd)
-	// KMEMLEAK has false positives. To mitigate most of them, it checksums
-	// potentially leaked objects, and reports them only on the next scan
-	// iff the checksum does not change. Because of that we do the following
-	// intricate dance:
-	// Scan, sleep, scan again. At this point we can get some leaks.
-	// If there are leaks, we sleep and scan again, this can remove
-	// false leaks. Then, read kmemleak again. If we get leaks now, then
-	// hopefully these are true positives during the previous testing cycle.
-	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
-		panic(err)
-	}
-	time.Sleep(time.Second)
-	// Account for MSECS_MIN_AGE
-	// (1 second less because scanning will take at least a second).
-	for time.Since(start) < 4*time.Second {
-		time.Sleep(time.Second)
-	}
-	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
-		panic(err)
-	}
-	buf := make([]byte, 128<<10)
-	n, err := syscall.Read(fd, buf)
-	if err != nil {
-		panic(err)
-	}
-	if n != 0 {
-		time.Sleep(time.Second)
-		if _, err := syscall.Write(fd, []byte("scan")); err != nil {
-			panic(err)
-		}
-		if _, err := syscall.Seek(fd, 0, 0); err != nil {
-			panic(err)
-		}
-		n, err := syscall.Read(fd, buf)
-		if err != nil {
-			panic(err)
-		}
-		nleaks := 0
-	nextLeak:
-		for buf = buf[:n]; len(buf) != 0; {
-			end := bytes.Index(buf[1:], []byte("unreferenced object"))
-			if end != -1 {
-				end++
-			} else {
-				end = len(buf)
-			}
-			report := buf[:end]
-			buf = buf[end:]
-			for _, frame := range leakFrames {
-				if bytes.Contains(report, frame) {
-					continue nextLeak
-				}
-			}
-			// BUG in output should be recognized by manager.
-			fmt.Printf("BUG: memory leak\n%s\n", report)
-			nleaks++
-		}
-		if nleaks != 0 {
-			// If we exit right away, dying executors will dump lots of garbage to console.
-			time.Sleep(time.Hour)
-			os.Exit(1)
-		}
-	}
-	if _, err := syscall.Write(fd, []byte("clear")); err != nil {
-		panic(err)
-	}
 }
 
 func checkSandboxNamespace() string {

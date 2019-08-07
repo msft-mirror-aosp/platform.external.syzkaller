@@ -145,7 +145,8 @@ static void sleep_ms(uint64 ms)
 }
 #endif
 
-#if SYZ_EXECUTOR || SYZ_THREADED || SYZ_REPEAT && SYZ_EXECUTOR_USES_FORK_SERVER
+#if SYZ_EXECUTOR || SYZ_THREADED || SYZ_REPEAT && SYZ_EXECUTOR_USES_FORK_SERVER || \
+    SYZ_ENABLE_LEAK
 #include <time.h>
 
 static uint64 current_time_ms(void)
@@ -218,7 +219,7 @@ static void remove_dir(const char* dir)
 #endif
 
 #if !GOOS_linux
-#if SYZ_EXECUTOR || SYZ_FAULT_INJECTION
+#if SYZ_EXECUTOR
 static int inject_fault(int nth)
 {
 	return 0;
@@ -280,9 +281,9 @@ typedef struct {
 static void event_init(event_t* ev)
 {
 	if (pthread_mutex_init(&ev->mu, 0))
-		fail("pthread_mutex_init failed");
+		exitf("pthread_mutex_init failed");
 	if (pthread_cond_init(&ev->cv, 0))
-		fail("pthread_cond_init failed");
+		exitf("pthread_cond_init failed");
 	ev->state = 0;
 }
 
@@ -478,7 +479,7 @@ again:
 			if (collide && (call % 2) == 0)
 				break;
 #endif
-			event_timedwait(&th->done, 45);
+			event_timedwait(&th->done, /*CALL_TIMEOUT*/);
 			break;
 		}
 	}
@@ -618,6 +619,7 @@ static void loop(void)
 				executed_calls = now_executed;
 				last_executed = now;
 			}
+			// TODO: adjust timeout for progs with syz_usb_connect call.
 			if ((now - start < 5 * 1000) && (now - start < 3 * 1000 || now - last_executed < 1000))
 				continue;
 #else
@@ -637,6 +639,11 @@ static void loop(void)
 #endif
 #if SYZ_EXECUTOR || SYZ_USE_TMP_DIR
 		remove_dir(cwdbuf);
+#endif
+#if SYZ_ENABLE_LEAK
+		// Note: this will fail under setuid sandbox because we don't have
+		// write permissions for the kmemleak file.
+		check_leaks();
 #endif
 	}
 }
@@ -686,6 +693,16 @@ int main(void)
 	/*MMAP_DATA*/
 #endif
 
+#if SYZ_ENABLE_BINFMT_MISC
+	setup_binfmt_misc();
+#endif
+#if SYZ_ENABLE_LEAK
+	setup_leak();
+#endif
+#if SYZ_FAULT_INJECTION
+	setup_fault();
+#endif
+
 #if SYZ_HANDLE_SEGV
 	install_segv_handler();
 #endif
@@ -705,6 +722,9 @@ int main(void)
 		}
 	}
 	sleep(1000000);
+#endif
+#if !SYZ_PROCS && !SYZ_REPEAT && SYZ_ENABLE_LEAK
+	check_leaks();
 #endif
 	return 0;
 }

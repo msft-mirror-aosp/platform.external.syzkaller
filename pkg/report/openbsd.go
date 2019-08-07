@@ -13,15 +13,12 @@ import (
 	"strings"
 
 	"github.com/google/syzkaller/pkg/symbolizer"
-	"github.com/google/syzkaller/sys/targets"
 )
 
 type openbsd struct {
-	kernelSrc    string
-	kernelObj    string
+	*config
 	kernelObject string
 	symbols      map[string][]symbolizer.Symbol
-	ignores      []*regexp.Regexp
 }
 
 var (
@@ -33,12 +30,11 @@ var (
 	}
 )
 
-func ctorOpenbsd(target *targets.Target, kernelSrc, kernelObj string,
-	ignores []*regexp.Regexp) (Reporter, []string, error) {
+func ctorOpenbsd(cfg *config) (Reporter, []string, error) {
 	var symbols map[string][]symbolizer.Symbol
 	kernelObject := ""
-	if kernelObj != "" {
-		kernelObject = filepath.Join(kernelObj, target.KernelObject)
+	if cfg.kernelObj != "" {
+		kernelObject = filepath.Join(cfg.kernelObj, cfg.target.KernelObject)
 		var err error
 		symbols, err = symbolizer.ReadSymbols(kernelObject)
 		if err != nil {
@@ -46,11 +42,9 @@ func ctorOpenbsd(target *targets.Target, kernelSrc, kernelObj string,
 		}
 	}
 	ctx := &openbsd{
-		kernelSrc:    kernelSrc,
-		kernelObj:    kernelObj,
+		config:       cfg,
 		kernelObject: kernelObject,
 		symbols:      symbols,
-		ignores:      ignores,
 	}
 	return ctx, nil, nil
 }
@@ -124,7 +118,7 @@ func (ctx *openbsd) symbolizeLine(symbFunc func(bin string, pc uint64) ([]symbol
 	var symbolized []byte
 	for _, frame := range frames {
 		file := frame.File
-		file = strings.TrimPrefix(file, ctx.kernelSrc)
+		file = strings.TrimPrefix(file, ctx.kernelBuildSrc)
 		file = strings.TrimPrefix(file, "/")
 		info := fmt.Sprintf(" %v:%v", file, frame.Line)
 		modified := append([]byte{}, line...)
