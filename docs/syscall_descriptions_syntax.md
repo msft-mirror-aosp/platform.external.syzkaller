@@ -27,11 +27,11 @@ rest of the type-options are type-specific:
 "intN"/"intptr": an integer without a particular meaning, type-options:
 	optional range of values (e.g. "5:10", or "100:200")
 "flags": a set of flags, type-options:
-	reference to flags description (see below)
+	reference to flags description (see below), underlying int type (e.g. "int32")
 "array": a variable/fixed-length array, type-options:
 	type of elements, optional size (fixed "5", or ranged "5:10", boundaries inclusive)
 "ptr"/"ptr64": a pointer to an object, type-options:
-	type of the object; direction (in/out/inout)
+	direction (in/out/inout); type of the object
 	ptr64 has size of 8 bytes regardless of target pointer size
 "string": a zero-terminated memory buffer (no pointer indirection implied), type-options:
 	either a string value in quotes for constant strings (e.g. "foo"),
@@ -50,6 +50,8 @@ rest of the type-options are type-specific:
 	argname of the object
 "bitsize": similar to "len", but always denotes the size in bits, type-options:
 	argname of the object
+"offsetof": offset of the field from the beginning of the parent struct, type-options:
+	field
 "vma"/"vma64": a pointer to a set of pages (used as input for mmap/munmap/mremap/madvise), type-options:
 	optional number of pages (e.g. vma[7]), or a range of pages (e.g. vma[2-4])
 	vma64 has size of 8 bytes regardless of target pointer size
@@ -217,10 +219,11 @@ type optional[T] [
 
 ## Length
 
-You can specify length of a particular field in struct or a named argument by using `len`, `bytesize` and `bitsize` types, for example:
+You can specify length of a particular field in struct or a named argument by
+using `len`, `bytesize` and `bitsize` types, for example:
 
 ```
-write(fd fd, buf buffer[in], count len[buf]) len[buf]
+write(fd fd, buf ptr[in, array[int8]], count len[buf])
 
 sock_fprog {
 	len	len[filter, int16]
@@ -228,23 +231,61 @@ sock_fprog {
 }
 ```
 
-If `len`'s argument is a pointer (or a `buffer`), then the length of the pointee argument is used.
+If `len`'s argument is a pointer, then the length of the pointee argument is used.
 
-To denote the length of a field in N-byte words use `bytesizeN`, possible values for N are 1, 2, 4 and 8.
+To denote the length of a field in N-byte words use `bytesizeN`, possible values
+for N are 1, 2, 4 and 8.
 
 To denote the length of the parent struct, you can use `len[parent, int8]`.
-To denote the length of the higher level parent when structs are embedded into one another, you can specify the type name of the particular parent:
+To denote the length of the higher level parent when structs are embedded into
+one another, you can specify the type name of the particular parent:
 
 ```
-struct s1 {
+s1 {
     f0      len[s2]  # length of s2
 }
 
-struct s2 {
+s2 {
     f0      s1
     f1      array[int32]
+    f2      len[parent, int32]
+}
+```
+
+`len` argument can also be a path expression which allows more complex
+addressing. Path expressions are similar to C field references, but also allow
+referencing parent and sibling elements. A special reference `syscall` used
+in the beginning of the path allows to refer directly to the syscall arguments.
+For example:
+
+```
+s1 {
+	a	ptr[in, s2]
+	b	ptr[in, s3]
+	c	array[int8]
 }
 
+s2 {
+	d	array[int8]
+}
+
+s3 {
+# This refers to the array c in the parent s1.
+	e	len[s1:c, int32]
+# This refers to the array d in the sibling s2.
+	f	len[s1:a:d, int32]
+# This refers to the array k in the child s4.
+	g	len[i:j, int32]
+# This refers to syscall argument l.
+	h	len[syscall:l, int32]
+	i	ptr[in, s4]
+}
+
+s4 {
+	j	array[int8]
+}
+
+foo(k ptr[in, s1], l ptr[in, array[int8]])
 ```
 
 ## Proc

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/ipc"
 	"github.com/google/syzkaller/pkg/log"
@@ -28,6 +29,7 @@ type checkArgs struct {
 	allSandboxes   bool
 	ipcConfig      *ipc.Config
 	ipcExecOpts    *ipc.ExecOpts
+	featureFlags   map[string]csource.Feature
 }
 
 func testImage(hostAddr string, args *checkArgs) {
@@ -141,7 +143,7 @@ func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
 		args.ipcConfig.Flags&ipc.FlagSandboxAndroidUntrustedApp != 0 {
 		return nil, fmt.Errorf("sandbox=android_untrusted_app is not supported (%v)", feat.Reason)
 	}
-	if err := checkSimpleProgram(args); err != nil {
+	if err := checkSimpleProgram(args, features); err != nil {
 		return nil, err
 	}
 	res := &rpctype.CheckArgs{
@@ -160,11 +162,11 @@ func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
 	}
 	for _, sandbox := range sandboxes {
 		enabledCalls, disabledCalls, err := buildCallList(args.target, args.enabledCalls, sandbox)
-		if err != nil {
-			return nil, err
-		}
 		res.EnabledCalls[sandbox] = enabledCalls
 		res.DisabledCalls[sandbox] = disabledCalls
+		if err != nil {
+			return res, err
+		}
 	}
 	if args.allSandboxes {
 		var enabled []int
@@ -220,8 +222,11 @@ func checkRevisions(args *checkArgs) error {
 	return nil
 }
 
-func checkSimpleProgram(args *checkArgs) error {
+func checkSimpleProgram(args *checkArgs, features *host.Features) error {
 	log.Logf(0, "testing simple program...")
+	if err := host.Setup(args.target, features, args.featureFlags, args.ipcConfig.Executor); err != nil {
+		return fmt.Errorf("host setup failed: %v", err)
+	}
 	env, err := ipc.MakeEnv(args.ipcConfig, 0)
 	if err != nil {
 		return fmt.Errorf("failed to create ipc env: %v", err)
@@ -291,11 +296,11 @@ func buildCallList(target *prog.Target, enabledCalls []int, sandbox string) (
 			delete(calls, c)
 		}
 	}
-	if len(calls) == 0 {
-		return nil, nil, fmt.Errorf("all system calls are disabled")
-	}
 	for c := range calls {
 		enabled = append(enabled, c.ID)
+	}
+	if len(calls) == 0 {
+		return enabled, disabled, fmt.Errorf("all system calls are disabled")
 	}
 	return enabled, disabled, nil
 }

@@ -242,7 +242,7 @@ func (comp *compiler) parseSizeAttr(attr *ast.Type) uint64 {
 		comp.error(sz.Pos, "unexpected %v, expect int", unexpected)
 		return sizeUnassigned
 	}
-	if sz.HasColon || len(sz.Args) != 0 {
+	if len(sz.Colon) != 0 || len(sz.Args) != 0 {
 		comp.error(sz.Pos, "size attribute has colon or args")
 		return sizeUnassigned
 	}
@@ -283,6 +283,16 @@ func (comp *compiler) getArgsBase(t *ast.Type, field string, dir prog.Dir, isArg
 		}
 	}
 	return desc, args, base
+}
+
+func (comp *compiler) derefPointers(t *ast.Type) (*ast.Type, *typeDesc) {
+	for {
+		desc := comp.getTypeDesc(t)
+		if desc != typePtr {
+			return t, desc
+		}
+		t = t.Args[1]
+	}
 }
 
 func (comp *compiler) foreachType(n0 ast.Node,
