@@ -25,6 +25,7 @@ const (
 	USB_DEVICE_ID_MATCH_INT_NUMBER
 
 	BytesPerUsbID = 17
+	BytesPerHidID = 12
 )
 
 type UsbDeviceID struct {
@@ -40,6 +41,13 @@ type UsbDeviceID struct {
 	BInterfaceSubClass uint8
 	BInterfaceProtocol uint8
 	BInterfaceNumber   uint8
+}
+
+type HidDeviceID struct {
+	Bus     uint16
+	Group   uint16
+	Vendor  uint32
+	Product uint32
 }
 
 func (arch *arch) generateUsbDeviceDescriptor(g *prog.Gen, typ0 prog.Type, old prog.Arg) (
@@ -100,20 +108,51 @@ func (arch *arch) generateUsbDeviceDescriptor(g *prog.Gen, typ0 prog.Type, old p
 		id.BInterfaceNumber = uint8(g.Rand().Intn(0xff + 1))
 	}
 
-	patchGroupArg(arg, 7, "idVendor", uint64(id.IDVendor))
-	patchGroupArg(arg, 8, "idProduct", uint64(id.IDProduct))
-	patchGroupArg(arg, 9, "bcdDevice", uint64(bcdDevice))
-	patchGroupArg(arg, 3, "bDeviceClass", uint64(id.BDeviceClass))
-	patchGroupArg(arg, 4, "bDeviceSubClass", uint64(id.BDeviceSubClass))
-	patchGroupArg(arg, 5, "bDeviceProtocol", uint64(id.BDeviceProtocol))
+	devArg := arg.(*prog.GroupArg).Inner[0]
+	patchGroupArg(devArg, 7, "idVendor", uint64(id.IDVendor))
+	patchGroupArg(devArg, 8, "idProduct", uint64(id.IDProduct))
+	patchGroupArg(devArg, 9, "bcdDevice", uint64(bcdDevice))
+	patchGroupArg(devArg, 3, "bDeviceClass", uint64(id.BDeviceClass))
+	patchGroupArg(devArg, 4, "bDeviceSubClass", uint64(id.BDeviceSubClass))
+	patchGroupArg(devArg, 5, "bDeviceProtocol", uint64(id.BDeviceProtocol))
 
-	configArg := arg.(*prog.GroupArg).Inner[14].(*prog.GroupArg).Inner[0]
-	interfaceArg := configArg.(*prog.GroupArg).Inner[8].(*prog.GroupArg).Inner[0]
+	configArg := devArg.(*prog.GroupArg).Inner[14].(*prog.GroupArg).Inner[0].(*prog.GroupArg).Inner[0]
+	interfaceArg := configArg.(*prog.GroupArg).Inner[8].(*prog.GroupArg).Inner[0].(*prog.GroupArg).Inner[0]
 
 	patchGroupArg(interfaceArg, 5, "bInterfaceClass", uint64(id.BInterfaceClass))
 	patchGroupArg(interfaceArg, 6, "bInterfaceSubClass", uint64(id.BInterfaceSubClass))
 	patchGroupArg(interfaceArg, 7, "bInterfaceProtocol", uint64(id.BInterfaceProtocol))
 	patchGroupArg(interfaceArg, 2, "bInterfaceNumber", uint64(id.BInterfaceNumber))
+
+	return
+}
+
+func (arch *arch) generateUsbHidDeviceDescriptor(g *prog.Gen, typ0 prog.Type, old prog.Arg) (
+	arg prog.Arg, calls []*prog.Call) {
+
+	if old == nil {
+		arg = g.GenerateSpecialArg(typ0, &calls)
+	} else {
+		arg = old
+		calls = g.MutateArg(arg)
+	}
+	if g.Target().ArgContainsAny(arg) {
+		return
+	}
+
+	totalIds := len(hidIds) / BytesPerHidID
+	idNum := g.Rand().Intn(totalIds)
+	base := hidIds[idNum*BytesPerHidID : (idNum+1)*BytesPerHidID]
+
+	p := strings.NewReader(base)
+	var id HidDeviceID
+	if binary.Read(p, binary.LittleEndian, &id) != nil {
+		panic("not enough data to read")
+	}
+
+	devArg := arg.(*prog.GroupArg).Inner[0]
+	patchGroupArg(devArg, 7, "idVendor", uint64(id.Vendor))
+	patchGroupArg(devArg, 8, "idProduct", uint64(id.Product))
 
 	return
 }

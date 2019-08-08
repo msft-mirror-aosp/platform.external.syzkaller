@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/google/syzkaller/pkg/db"
 	"github.com/google/syzkaller/pkg/gce"
 	"github.com/google/syzkaller/pkg/hash"
+	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -275,7 +275,7 @@ type RunResult struct {
 
 type ReproResult struct {
 	instances []int
-	title0    string
+	report0   *report.Report // the original report we started reproducing
 	res       *repro.Result
 	stats     *repro.Stats
 	err       error
@@ -344,7 +344,14 @@ func (mgr *Manager) vmLoop() {
 				log.Logf(1, "loop: starting repro of '%v' on instances %+v", crash.Title, vmIndexes)
 				go func() {
 					res, stats, err := repro.Run(crash.Output, mgr.cfg, mgr.reporter, mgr.vmPool, vmIndexes)
-					reproDone <- &ReproResult{vmIndexes, crash.Title, res, stats, err, crash.hub}
+					reproDone <- &ReproResult{
+						instances: vmIndexes,
+						report0:   crash.Report,
+						res:       res,
+						stats:     stats,
+						err:       err,
+						hub:       crash.hub,
+					}
 				}()
 			}
 			for !canRepro() && len(instances) != 0 {
@@ -394,16 +401,16 @@ func (mgr *Manager) vmLoop() {
 				title = res.res.Report.Title
 			}
 			log.Logf(1, "loop: repro on %+v finished '%v', repro=%v crepro=%v desc='%v'",
-				res.instances, res.title0, res.res != nil, crepro, title)
+				res.instances, res.report0.Title, res.res != nil, crepro, title)
 			if res.err != nil {
 				log.Logf(0, "repro failed: %v", res.err)
 			}
-			delete(reproducing, res.title0)
+			delete(reproducing, res.report0.Title)
 			instances = append(instances, res.instances...)
 			reproInstances -= instancesPerRepro
 			if res.res == nil {
 				if !res.hub {
-					mgr.saveFailedRepro(res.title0, res.stats)
+					mgr.saveFailedRepro(res.report0, res.stats)
 				}
 			} else {
 				mgr.saveRepro(res.res, res.stats, res.hub)
@@ -575,11 +582,9 @@ func (mgr *Manager) emailCrash(crash *Crash) {
 }
 
 func (mgr *Manager) saveCrash(crash *Crash) bool {
-	isMemoryLeak := strings.HasPrefix(crash.Title, report.MemoryLeakPrefix)
-	if isMemoryLeak {
-		frame := crash.Title[len(report.MemoryLeakPrefix):]
+	if crash.Type == report.MemoryLeak {
 		mgr.mu.Lock()
-		mgr.memoryLeakFrames[frame] = true
+		mgr.memoryLeakFrames[crash.Frame] = true
 		mgr.mu.Unlock()
 	}
 	if crash.Suppressed {
@@ -605,7 +610,7 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 	mgr.mu.Unlock()
 
 	if mgr.dash != nil {
-		if isMemoryLeak {
+		if crash.Type == report.MemoryLeak {
 			return true
 		}
 		dc := &dashapi.Crash{
@@ -669,6 +674,11 @@ func (mgr *Manager) needLocalRepro(crash *Crash) bool {
 	if !mgr.cfg.Reproduce || crash.Corrupted {
 		return false
 	}
+	if mgr.checkResult.Features[host.FeatureLeakChecking].Enabled &&
+		crash.Type != report.MemoryLeak {
+		// Leak checking is very slow, don't bother reproducing other crashes.
+		return false
+	}
 	sig := hash.Hash([]byte(crash.Title))
 	dir := filepath.Join(mgr.crashdir, sig.String())
 	if osutil.IsExist(filepath.Join(dir, "repro.prog")) {
@@ -689,7 +699,7 @@ func (mgr *Manager) needRepro(crash *Crash) bool {
 	if mgr.dash == nil {
 		return mgr.needLocalRepro(crash)
 	}
-	if strings.HasPrefix(crash.Title, report.MemoryLeakPrefix) {
+	if crash.Type == report.MemoryLeak {
 		return true
 	}
 	cid := &dashapi.CrashID{
@@ -704,8 +714,8 @@ func (mgr *Manager) needRepro(crash *Crash) bool {
 	return needRepro
 }
 
-func (mgr *Manager) saveFailedRepro(title string, stats *repro.Stats) {
-	if strings.HasPrefix(title, report.MemoryLeakPrefix) {
+func (mgr *Manager) saveFailedRepro(rep *report.Report, stats *repro.Stats) {
+	if rep.Type == report.MemoryLeak {
 		// Don't send failed leak repro attempts to dashboard
 		// as we did not send the crash itself.
 		return
@@ -713,7 +723,7 @@ func (mgr *Manager) saveFailedRepro(title string, stats *repro.Stats) {
 	if mgr.dash != nil {
 		cid := &dashapi.CrashID{
 			BuildID: mgr.cfg.Tag,
-			Title:   title,
+			Title:   rep.Title,
 		}
 		if err := mgr.dash.ReportFailedRepro(cid); err != nil {
 			log.Logf(0, "failed to report failed repro to dashboard: %v", err)
@@ -721,7 +731,7 @@ func (mgr *Manager) saveFailedRepro(title string, stats *repro.Stats) {
 			return
 		}
 	}
-	dir := filepath.Join(mgr.crashdir, hash.String([]byte(title)))
+	dir := filepath.Join(mgr.crashdir, hash.String([]byte(rep.Title)))
 	osutil.MkdirAll(dir)
 	for i := 0; i < maxReproAttempts; i++ {
 		name := filepath.Join(dir, fmt.Sprintf("repro%v", i))
@@ -885,7 +895,7 @@ func (mgr *Manager) minimizeCorpus() {
 	mgr.corpusDB.BumpVersion(currentDBVersion)
 }
 
-func (mgr *Manager) fuzzerConnect() ([]rpctype.RPCInput, [][]byte) {
+func (mgr *Manager) fuzzerConnect() ([]rpctype.RPCInput, []string) {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
@@ -894,9 +904,9 @@ func (mgr *Manager) fuzzerConnect() ([]rpctype.RPCInput, [][]byte) {
 	for _, inp := range mgr.corpus {
 		corpus = append(corpus, inp)
 	}
-	memoryLeakFrames := make([][]byte, 0, len(mgr.memoryLeakFrames))
+	memoryLeakFrames := make([]string, 0, len(mgr.memoryLeakFrames))
 	for frame := range mgr.memoryLeakFrames {
-		memoryLeakFrames = append(memoryLeakFrames, []byte(frame))
+		memoryLeakFrames = append(memoryLeakFrames, frame)
 	}
 	return corpus, memoryLeakFrames
 }

@@ -71,7 +71,8 @@ static int event_timedwait(event_t* ev, uint64 timeout)
 #endif
 
 #if SYZ_EXECUTOR || SYZ_REPEAT || SYZ_TUN_ENABLE || SYZ_FAULT_INJECTION || SYZ_SANDBOX_NONE || \
-    SYZ_SANDBOX_SETUID || SYZ_SANDBOX_NAMESPACE || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
+    SYZ_SANDBOX_SETUID || SYZ_SANDBOX_NAMESPACE || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP ||        \
+    SYZ_FAULT_INJECTION || SYZ_ENABLE_LEAK || SYZ_ENABLE_BINFMT_MISC
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -1868,26 +1869,6 @@ void initialize_cgroups()
 #endif
 #endif
 
-#if SYZ_EXECUTOR || (SYZ_ENABLE_BINFMT_MISC && (SYZ_SANDBOX_NONE || SYZ_SANDBOX_SETUID || SYZ_SANDBOX_NAMESPACE || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP))
-#include <fcntl.h>
-#include <sys/mount.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-
-static void setup_binfmt_misc()
-{
-#if SYZ_EXECUTOR
-	if (!flag_enable_binfmt_misc)
-		return;
-#endif
-	if (mount(0, "/proc/sys/fs/binfmt_misc", "binfmt_misc", 0, 0)) {
-		debug("mount(binfmt_misc) failed: %d\n", errno);
-	}
-	write_file("/proc/sys/fs/binfmt_misc/register", ":syz0:M:0:\x01::./file0:");
-	write_file("/proc/sys/fs/binfmt_misc/register", ":syz1:M:1:\x02::./file0:POC");
-}
-#endif
-
 #if SYZ_EXECUTOR || SYZ_SANDBOX_NONE || SYZ_SANDBOX_SETUID || SYZ_SANDBOX_NAMESPACE || SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
 #include <errno.h>
 #include <sys/mount.h>
@@ -1899,9 +1880,6 @@ static void setup_common()
 	}
 #if SYZ_EXECUTOR || SYZ_ENABLE_CGROUPS
 	setup_cgroups();
-#endif
-#if SYZ_EXECUTOR || SYZ_ENABLE_BINFMT_MISC
-	setup_binfmt_misc();
 #endif
 }
 
@@ -1998,6 +1976,37 @@ int wait_for_loop(int pid)
 }
 #endif
 
+#if SYZ_EXECUTOR || SYZ_SANDBOX_NONE || SYZ_SANDBOX_NAMESPACE
+#include <linux/capability.h>
+
+static void drop_caps(void)
+{
+	struct __user_cap_header_struct cap_hdr = {};
+	struct __user_cap_data_struct cap_data[2] = {};
+	cap_hdr.version = _LINUX_CAPABILITY_VERSION_3;
+	cap_hdr.pid = getpid();
+	if (syscall(SYS_capget, &cap_hdr, &cap_data))
+		fail("capget failed");
+	// Drop CAP_SYS_PTRACE so that test processes can't attach to parent processes.
+	// Previously it lead to hangs because the loop process stopped due to SIGSTOP.
+	// Note that a process can always ptrace its direct children, which is enough for testing purposes.
+	//
+	// A process with CAP_SYS_NICE can bring kernel down by asking for too high SCHED_DEADLINE priority,
+	// as the result rcu and other system services that use kernel threads will stop functioning.
+	// Some parameters for SCHED_DEADLINE should be OK, but we don't have means to enforce
+	// values of indirect syscall arguments. Peter Zijlstra proposed sysctl_deadline_period_{min,max}
+	// which could be used to enfore safe limits without droppping CAP_SYS_NICE, but we don't have it yet.
+	// See the following bug for details:
+	// https://groups.google.com/forum/#!topic/syzkaller-bugs/G6Wl_PKPIWI
+	const int drop = (1 << CAP_SYS_PTRACE) | (1 << CAP_SYS_NICE);
+	cap_data[0].effective &= ~drop;
+	cap_data[0].permitted &= ~drop;
+	cap_data[0].inheritable &= ~drop;
+	if (syscall(SYS_capset, &cap_hdr, &cap_data))
+		fail("capset failed");
+}
+#endif
+
 #if SYZ_EXECUTOR || SYZ_SANDBOX_NONE
 #include <sched.h>
 #include <sys/types.h>
@@ -2019,6 +2028,7 @@ static int do_sandbox_none(void)
 
 	setup_common();
 	sandbox_common();
+	drop_caps();
 #if SYZ_EXECUTOR || SYZ_ENABLE_NETDEV
 	initialize_netdevices_init();
 #endif
@@ -2085,7 +2095,6 @@ static int do_sandbox_setuid(void)
 #endif
 
 #if SYZ_EXECUTOR || SYZ_SANDBOX_NAMESPACE
-#include <linux/capability.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -2173,22 +2182,7 @@ static int namespace_sandbox_proc(void* arg)
 		fail("chroot failed");
 	if (chdir("/"))
 		fail("chdir failed");
-
-	// Drop CAP_SYS_PTRACE so that test processes can't attach to parent processes.
-	// Previously it lead to hangs because the loop process stopped due to SIGSTOP.
-	// Note that a process can always ptrace its direct children, which is enough
-	// for testing purposes.
-	struct __user_cap_header_struct cap_hdr = {};
-	struct __user_cap_data_struct cap_data[2] = {};
-	cap_hdr.version = _LINUX_CAPABILITY_VERSION_3;
-	cap_hdr.pid = getpid();
-	if (syscall(SYS_capget, &cap_hdr, &cap_data))
-		fail("capget failed");
-	cap_data[0].effective &= ~(1 << CAP_SYS_PTRACE);
-	cap_data[0].permitted &= ~(1 << CAP_SYS_PTRACE);
-	cap_data[0].inheritable &= ~(1 << CAP_SYS_PTRACE);
-	if (syscall(SYS_capset, &cap_hdr, &cap_data))
-		fail("capset failed");
+	drop_caps();
 
 	loop();
 	doexit(1);
@@ -2475,10 +2469,6 @@ retry:
 
 static int inject_fault(int nth)
 {
-#if SYZ_EXECUTOR
-	if (!flag_enable_fault_injection)
-		return 0;
-#endif
 	int fd;
 	fd = open("/proc/thread-self/fail-nth", O_RDWR);
 	// We treat errors here as temporal/non-critical because we see
@@ -2497,8 +2487,6 @@ static int inject_fault(int nth)
 #if SYZ_EXECUTOR
 static int fault_injected(int fail_fd)
 {
-	if (!flag_enable_fault_injection)
-		return 0;
 	char buf[16];
 	int n = read(fail_fd, buf, sizeof(buf) - 1);
 	if (n <= 0)
@@ -2644,5 +2632,149 @@ static void close_fds()
 	int fd;
 	for (fd = 3; fd < 30; fd++)
 		close(fd);
+}
+#endif
+
+#if SYZ_EXECUTOR || SYZ_FAULT_INJECTION
+#include <errno.h>
+
+static void setup_fault()
+{
+	static struct {
+		const char* file;
+		const char* val;
+		bool fatal;
+	} files[] = {
+	    {"/sys/kernel/debug/failslab/ignore-gfp-wait", "N", true},
+	    // These are enabled by separate configs (e.g. CONFIG_FAIL_FUTEX)
+	    // and we did not check all of them in host.checkFaultInjection, so we ignore errors.
+	    {"/sys/kernel/debug/fail_futex/ignore-private", "N", false},
+	    {"/sys/kernel/debug/fail_page_alloc/ignore-gfp-highmem", "N", false},
+	    {"/sys/kernel/debug/fail_page_alloc/ignore-gfp-wait", "N", false},
+	    {"/sys/kernel/debug/fail_page_alloc/min-order", "0", false},
+	};
+	unsigned i;
+	for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+		if (!write_file(files[i].file, files[i].val)) {
+			debug("failed to write %s: %d\n", files[i].file, errno);
+			if (files[i].fatal)
+				fail("failed to write %s", files[i].file);
+		}
+	}
+}
+#endif
+
+#if SYZ_EXECUTOR || SYZ_ENABLE_LEAK
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#define KMEMLEAK_FILE "/sys/kernel/debug/kmemleak"
+
+static void setup_leak()
+{
+	// Flush boot leaks.
+	if (!write_file(KMEMLEAK_FILE, "scan"))
+		fail("failed to write %s", KMEMLEAK_FILE);
+	sleep(5); // account for MSECS_MIN_AGE
+	if (!write_file(KMEMLEAK_FILE, "scan"))
+		fail("failed to write %s", KMEMLEAK_FILE);
+	if (!write_file(KMEMLEAK_FILE, "clear"))
+		fail("failed to write %s", KMEMLEAK_FILE);
+}
+
+#define SYZ_HAVE_LEAK_CHECK 1
+#if SYZ_EXECUTOR
+static void check_leaks(char** frames, int nframes)
+#else
+static void check_leaks(void)
+#endif
+{
+	int fd = open(KMEMLEAK_FILE, O_RDWR);
+	if (fd == -1)
+		fail("failed to open(\"%s\")", KMEMLEAK_FILE);
+	// KMEMLEAK has false positives. To mitigate most of them, it checksums
+	// potentially leaked objects, and reports them only on the next scan
+	// iff the checksum does not change. Because of that we do the following
+	// intricate dance:
+	// Scan, sleep, scan again. At this point we can get some leaks.
+	// If there are leaks, we sleep and scan again, this can remove
+	// false leaks. Then, read kmemleak again. If we get leaks now, then
+	// hopefully these are true positives during the previous testing cycle.
+	uint64 start = current_time_ms();
+	if (write(fd, "scan", 4) != 4)
+		fail("failed to write(%s, \"scan\")", KMEMLEAK_FILE);
+	sleep(1);
+	// Account for MSECS_MIN_AGE
+	// (1 second less because scanning will take at least a second).
+	while (current_time_ms() - start < 4 * 1000)
+		sleep(1);
+	if (write(fd, "scan", 4) != 4)
+		fail("failed to write(%s, \"scan\")", KMEMLEAK_FILE);
+	static char buf[128 << 10];
+	ssize_t n = read(fd, buf, sizeof(buf) - 1);
+	if (n < 0)
+		fail("failed to read(%s)", KMEMLEAK_FILE);
+	int nleaks = 0;
+	if (n != 0) {
+		sleep(1);
+		if (write(fd, "scan", 4) != 4)
+			fail("failed to write(%s, \"scan\")", KMEMLEAK_FILE);
+		if (lseek(fd, 0, SEEK_SET) < 0)
+			fail("failed to lseek(%s)", KMEMLEAK_FILE);
+		n = read(fd, buf, sizeof(buf) - 1);
+		if (n < 0)
+			fail("failed to read(%s)", KMEMLEAK_FILE);
+		buf[n] = 0;
+		char* pos = buf;
+		char* end = buf + n;
+		while (pos < end) {
+			char* next = strstr(pos + 1, "unreferenced object");
+			if (!next)
+				next = end;
+			char prev = *next;
+			*next = 0;
+#if SYZ_EXECUTOR
+			int f;
+			for (f = 0; f < nframes; f++) {
+				if (strstr(pos, frames[f]))
+					break;
+			}
+			if (f != nframes) {
+				*next = prev;
+				pos = next;
+				continue;
+			}
+#endif
+			// BUG in output should be recognized by manager.
+			fprintf(stderr, "BUG: memory leak\n%s\n", pos);
+			*next = prev;
+			pos = next;
+			nleaks++;
+		}
+	}
+	if (write(fd, "clear", 5) != 5)
+		fail("failed to write(%s, \"clear\")", KMEMLEAK_FILE);
+	close(fd);
+	if (nleaks)
+		doexit(1);
+}
+#endif
+
+#if SYZ_EXECUTOR || SYZ_ENABLE_BINFMT_MISC
+#include <fcntl.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+static void setup_binfmt_misc()
+{
+	if (mount(0, "/proc/sys/fs/binfmt_misc", "binfmt_misc", 0, 0)) {
+		debug("mount(binfmt_misc) failed: %d\n", errno);
+	}
+	write_file("/proc/sys/fs/binfmt_misc/register", ":syz0:M:0:\x01::./file0:");
+	write_file("/proc/sys/fs/binfmt_misc/register", ":syz1:M:1:\x02::./file0:POC");
 }
 #endif

@@ -39,6 +39,7 @@ func initHTTPHandlers() {
 	for ns := range config.Namespaces {
 		http.Handle("/"+ns, handlerWrapper(handleMain))
 		http.Handle("/"+ns+"/fixed", handlerWrapper(handleFixed))
+		http.Handle("/"+ns+"/invalid", handlerWrapper(handleInvalid))
 	}
 }
 
@@ -51,7 +52,7 @@ type uiMainPage struct {
 	Groups     []*uiBugGroup
 }
 
-type uiFixedPage struct {
+type uiTerminalPage struct {
 	Header *uiHeader
 	Now    time.Time
 	Bugs   *uiBugGroup
@@ -110,6 +111,7 @@ type uiBugPage struct {
 	Now            time.Time
 	Bug            *uiBug
 	BisectCause    *uiJob
+	BisectFix      *uiJob
 	DupOf          *uiBugGroup
 	Dups           *uiBugGroup
 	Similar        *uiBugGroup
@@ -224,22 +226,47 @@ func handleMain(c context.Context, w http.ResponseWriter, r *http.Request) error
 }
 
 func handleFixed(c context.Context, w http.ResponseWriter, r *http.Request) error {
+	return handleTerminalBugList(c, w, r, &TerminalBug{
+		Status:    BugStatusFixed,
+		Subpage:   "/fixed",
+		Caption:   "fixed",
+		ShowPatch: true,
+	})
+}
+
+func handleInvalid(c context.Context, w http.ResponseWriter, r *http.Request) error {
+	return handleTerminalBugList(c, w, r, &TerminalBug{
+		Status:    BugStatusInvalid,
+		Subpage:   "/invalid",
+		Caption:   "invalid",
+		ShowPatch: false,
+	})
+}
+
+type TerminalBug struct {
+	Status    int
+	Subpage   string
+	Caption   string
+	ShowPatch bool
+}
+
+func handleTerminalBugList(c context.Context, w http.ResponseWriter, r *http.Request, typ *TerminalBug) error {
 	accessLevel := accessLevel(c, r)
 	hdr, err := commonHeader(c, r, w, "")
 	if err != nil {
 		return err
 	}
-	hdr.Subpage = "/fixed"
-	bugs, err := fetchFixedBugs(c, accessLevel, hdr.Namespace)
+	hdr.Subpage = typ.Subpage
+	bugs, err := fetchTerminalBugs(c, accessLevel, hdr.Namespace, typ)
 	if err != nil {
 		return err
 	}
-	data := &uiFixedPage{
+	data := &uiTerminalPage{
 		Header: hdr,
 		Now:    timeNow(c),
 		Bugs:   bugs,
 	}
-	return serveTemplate(w, "fixed.html", data)
+	return serveTemplate(w, "terminal.html", data)
 }
 
 func handleAdmin(c context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -334,20 +361,17 @@ func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error 
 	}
 	var bisectCause *uiJob
 	if bug.BisectCause > BisectPending {
-		job, _, jobKey, _, err := loadBisectJob(c, bug)
+		bisectCause, err = getUIJob(c, bug, JobBisectCause)
 		if err != nil {
 			return err
 		}
-		crash := new(Crash)
-		crashKey := db.NewKey(c, "Crash", "", job.CrashID, bug.key(c))
-		if err := db.Get(c, crashKey, crash); err != nil {
-			return fmt.Errorf("failed to get crash: %v", err)
-		}
-		build, err := loadBuild(c, bug.Namespace, crash.BuildID)
+	}
+	var bisectFix *uiJob
+	if bug.BisectFix > BisectPending {
+		bisectFix, err = getUIJob(c, bug, JobBisectFix)
 		if err != nil {
 			return err
 		}
-		bisectCause = makeUIJob(job, jobKey, crash, build)
 	}
 	hasMaintainers := false
 	for _, crash := range crashes {
@@ -361,6 +385,7 @@ func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error 
 		Now:            timeNow(c),
 		Bug:            uiBug,
 		BisectCause:    bisectCause,
+		BisectFix:      bisectFix,
 		DupOf:          dupOf,
 		Dups:           dups,
 		Similar:        similar,
@@ -369,6 +394,23 @@ func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error 
 		Crashes:        crashes,
 	}
 	return serveTemplate(w, "bug.html", data)
+}
+
+func getUIJob(c context.Context, bug *Bug, jobType JobType) (*uiJob, error) {
+	job, _, jobKey, _, err := loadBisectJob(c, bug, jobType)
+	if err != nil {
+		return nil, err
+	}
+	crash := new(Crash)
+	crashKey := db.NewKey(c, "Crash", "", job.CrashID, bug.key(c))
+	if err := db.Get(c, crashKey, crash); err != nil {
+		return nil, fmt.Errorf("failed to get crash: %v", err)
+	}
+	build, err := loadBuild(c, bug.Namespace, crash.BuildID)
+	if err != nil {
+		return nil, err
+	}
+	return makeUIJob(job, jobKey, crash, build), nil
 }
 
 // handleText serves plain text blobs (crash logs, reports, reproducers, etc).
@@ -538,11 +580,11 @@ func fetchNamespaceBugs(c context.Context, accessLevel AccessLevel, ns string) (
 	return uiGroups, fixedCount, nil
 }
 
-func fetchFixedBugs(c context.Context, accessLevel AccessLevel, ns string) (*uiBugGroup, error) {
+func fetchTerminalBugs(c context.Context, accessLevel AccessLevel, ns string, typ *TerminalBug) (*uiBugGroup, error) {
 	var bugs []*Bug
 	_, err := db.NewQuery("Bug").
 		Filter("Namespace=", ns).
-		Filter("Status=", BugStatusFixed).
+		Filter("Status=", typ.Status).
 		GetAll(c, &bugs)
 	if err != nil {
 		return nil, err
@@ -557,8 +599,8 @@ func fetchFixedBugs(c context.Context, accessLevel AccessLevel, ns string) (*uiB
 	}
 	res := &uiBugGroup{
 		Now:       timeNow(c),
-		Caption:   "fixed",
-		ShowPatch: true,
+		Caption:   typ.Caption,
+		ShowPatch: typ.ShowPatch,
 		Namespace: ns,
 	}
 	for _, bug := range bugs {

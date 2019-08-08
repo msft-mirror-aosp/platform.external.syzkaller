@@ -5,13 +5,17 @@ package csource
 
 import (
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/prog"
 	_ "github.com/google/syzkaller/sys"
 	"github.com/google/syzkaller/sys/targets"
@@ -27,17 +31,6 @@ func TestGenerate(t *testing.T) {
 			continue
 		}
 		t.Run(target.OS+"/"+target.Arch, func(t *testing.T) {
-			if target.OS == "linux" && target.Arch == "arm" {
-				// This currently fails (at least with my arm-linux-gnueabihf-gcc-4.8) with:
-				// Assembler messages:
-				// Error: alignment too large: 15 assumed
-				t.Skip("broken")
-			}
-			if target.OS == "linux" && target.Arch == "386" {
-				// Currently fails on travis with:
-				// fatal error: asm/unistd.h: No such file or directory
-				t.Skip("broken")
-			}
 			if target.OS == "linux" && target.Arch == "arm64" {
 				// Episodically fails on travis with:
 				// collect2: error: ld terminated with signal 11 [Segmentation fault]
@@ -59,6 +52,17 @@ func TestGenerate(t *testing.T) {
 	}
 }
 
+// This is the main configuration used by executor, so we want to test it as well.
+var executorOpts = Options{
+	Threaded:  true,
+	Collide:   true,
+	Repeat:    true,
+	Procs:     2,
+	Sandbox:   "none",
+	Repro:     true,
+	UseTmpDir: true,
+}
+
 func testTarget(t *testing.T, target *prog.Target, full bool) {
 	seed := time.Now().UnixNano()
 	if os.Getenv("TRAVIS") != "" {
@@ -78,17 +82,7 @@ func testTarget(t *testing.T, target *prog.Target, full bool) {
 	if !full || testing.Short() {
 		p.Calls = append(p.Calls, syzProg.Calls...)
 		opts = allOptionsSingle(target.OS)
-		// This is the main configuration used by executor,
-		// so we want to test it as well.
-		opts = append(opts, Options{
-			Threaded:  true,
-			Collide:   true,
-			Repeat:    true,
-			Procs:     2,
-			Sandbox:   "none",
-			Repro:     true,
-			UseTmpDir: true,
-		})
+		opts = append(opts, executorOpts)
 	} else {
 		minimized, _ := prog.Minimize(syzProg, -1, false, func(p *prog.Prog, call int) bool {
 			return len(p.Calls) == len(syzProg.Calls)
@@ -117,4 +111,44 @@ func testOne(t *testing.T, p *prog.Prog, opts Options) {
 		t.Fatalf("%v", err)
 	}
 	defer os.Remove(bin)
+}
+
+func TestSysTests(t *testing.T) {
+	t.Parallel()
+	for _, target := range prog.AllTargets() {
+		target := target
+		sysTarget := targets.Get(target.OS, target.Arch)
+		if runtime.GOOS != sysTarget.BuildOS {
+			continue // we need at least preprocessor binary to generate sources
+		}
+		t.Run(target.OS+"/"+target.Arch, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join("..", "..", "sys", target.OS, "test")
+			if !osutil.IsExist(dir) {
+				return
+			}
+			files, err := ioutil.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("failed to read %v: %v", dir, err)
+			}
+			for _, finfo := range files {
+				file := filepath.Join(dir, finfo.Name())
+				if strings.HasSuffix(file, "~") || strings.HasSuffix(file, ".swp") {
+					continue
+				}
+				data, err := ioutil.ReadFile(file)
+				if err != nil {
+					t.Fatalf("failed to read %v: %v", file, err)
+				}
+				p, err := target.Deserialize(data, prog.Strict)
+				if err != nil {
+					t.Fatalf("failed to parse program %v: %v", file, err)
+				}
+				_, err = Write(p, executorOpts)
+				if err != nil {
+					t.Fatalf("failed to generate C source for %v: %v", file, err)
+				}
+			}
+		})
+	}
 }

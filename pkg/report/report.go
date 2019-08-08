@@ -31,6 +31,10 @@ type Reporter interface {
 type Report struct {
 	// Title contains a representative description of the first oops.
 	Title string
+	// Bug type (e.g. hang, memory leak, etc).
+	Type Type
+	// The indicative function name.
+	Frame string
 	// Report contains whole oops text.
 	Report []byte
 	// Output contains whole raw console output as passed to Reporter.Parse.
@@ -52,6 +56,30 @@ type Report struct {
 	reportPrefixLen int
 }
 
+type Type int
+
+const (
+	Unknown Type = iota
+	Hang
+	MemoryLeak
+	UnexpectedReboot
+)
+
+func (t Type) String() string {
+	switch t {
+	case Unknown:
+		return "UNKNOWN"
+	case Hang:
+		return "HANG"
+	case MemoryLeak:
+		return "LEAK"
+	case UnexpectedReboot:
+		return "REBOOT"
+	default:
+		panic("unknown report type")
+	}
+}
+
 // NewReporter creates reporter for the specified OS/Type.
 func NewReporter(cfg *mgrconfig.Config) (Reporter, error) {
 	typ := cfg.TargetOS
@@ -70,7 +98,14 @@ func NewReporter(cfg *mgrconfig.Config) (Reporter, error) {
 	if target == nil && typ != "gvisor" {
 		return nil, fmt.Errorf("unknown target %v/%v", cfg.TargetOS, cfg.TargetArch)
 	}
-	rep, suppressions, err := ctor(target, cfg.KernelSrc, cfg.KernelObj, ignores)
+	config := &config{
+		target:         target,
+		kernelSrc:      cfg.KernelSrc,
+		kernelBuildSrc: cfg.KernelBuildSrc,
+		kernelObj:      cfg.KernelObj,
+		ignores:        ignores,
+	}
+	rep, suppressions, err := ctor(config)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +116,10 @@ func NewReporter(cfg *mgrconfig.Config) (Reporter, error) {
 	return &reporterWrapper{rep, supps, typ}, nil
 }
 
-const UnexpectedKernelReboot = "unexpected kernel reboot"
+const (
+	unexpectedKernelReboot = "unexpected kernel reboot"
+	memoryLeakPrefix       = "memory leak in "
+)
 
 var ctors = map[string]fn{
 	"akaros":  ctorAkaros,
@@ -94,7 +132,15 @@ var ctors = map[string]fn{
 	"windows": ctorStub,
 }
 
-type fn func(*targets.Target, string, string, []*regexp.Regexp) (Reporter, []string, error)
+type config struct {
+	target         *targets.Target
+	kernelSrc      string
+	kernelBuildSrc string
+	kernelObj      string
+	ignores        []*regexp.Regexp
+}
+
+type fn func(cfg *config) (Reporter, []string, error)
 
 func compileRegexps(list []string) ([]*regexp.Regexp, error) {
 	compiled := make([]*regexp.Regexp, len(list))
@@ -124,7 +170,29 @@ func (wrap *reporterWrapper) Parse(output []byte) *Report {
 	if bytes.Contains(rep.Output, gceConsoleHangup) {
 		rep.Corrupted = true
 	}
+	rep.Type = extractReportType(rep)
+	if match := reportFrameRe.FindStringSubmatch(rep.Title); match != nil {
+		rep.Frame = match[1]
+	}
 	return rep
+}
+
+func extractReportType(rep *Report) Type {
+	// Type/frame extraction logic should be integrated with oops types.
+	// But for now we do this more ad-hoc analysis here to at least isolate
+	// the rest of the code base from report parsing.
+	if rep.Title == unexpectedKernelReboot {
+		return UnexpectedReboot
+	}
+	if strings.HasPrefix(rep.Title, memoryLeakPrefix) {
+		return MemoryLeak
+	}
+	if strings.HasPrefix(rep.Title, "INFO: rcu detected stall") ||
+		strings.HasPrefix(rep.Title, "INFO: task hung") ||
+		strings.HasPrefix(rep.Title, "BUG: soft lockup") {
+		return Hang
+	}
+	return Unknown
 }
 
 func IsSuppressed(reporter Reporter, output []byte) bool {
@@ -258,7 +326,7 @@ var parseStackTrace *regexp.Regexp
 
 func compile(re string) *regexp.Regexp {
 	re = strings.Replace(re, "{{ADDR}}", "0x[0-9a-f]+", -1)
-	re = strings.Replace(re, "{{PC}}", "\\[\\<(?:0x)?[0-9a-f]+\\>\\]", -1)
+	re = strings.Replace(re, "{{PC}}", "\\[\\<?(?:0x)?[0-9a-f]+\\>?\\]", -1)
 	re = strings.Replace(re, "{{FUNC}}", "([a-zA-Z0-9_]+)(?:\\.|\\+)", -1)
 	re = strings.Replace(re, "{{SRC}}", "([a-zA-Z0-9-_/.]+\\.[a-z]+:[0-9]+)", -1)
 	return regexp.MustCompile(re)
@@ -411,20 +479,14 @@ nextPart:
 				if matchesAny(ln, params.stackStartRes) {
 					continue nextPart
 				}
-				var match []int
+				var match [][]byte
 				for _, re := range params.frameRes {
-					match = re.FindSubmatchIndex(ln)
+					match = re.FindSubmatch(ln)
 					if match != nil {
 						break
 					}
 				}
-				if match == nil {
-					continue
-				}
-				frame := ln[match[2]:match[3]]
-				if skipRe == nil || !skipRe.Match(frame) {
-					frames = append(frames, string(frame))
-				}
+				frames = appendStackFrame(frames, match, skipRe)
 			}
 		} else {
 			for s.Scan() {
@@ -432,16 +494,11 @@ nextPart:
 				if matchesAny(ln, params.corruptedLines) {
 					break nextPart
 				}
-				match := part.FindSubmatchIndex(ln)
+				match := part.FindSubmatch(ln)
 				if match == nil {
 					continue
 				}
-				if len(match) == 4 && match[2] != -1 {
-					frame := ln[match[2]:match[3]]
-					if skipRe == nil || !skipRe.Match(frame) {
-						frames = append(frames, string(frame))
-					}
-				}
+				frames = appendStackFrame(frames, match, skipRe)
 				break
 			}
 		}
@@ -450,6 +507,19 @@ nextPart:
 		return "", "extracted no frames"
 	}
 	return extractor(frames)
+}
+
+func appendStackFrame(frames []string, match [][]byte, skipRe *regexp.Regexp) []string {
+	if len(match) < 2 {
+		return frames
+	}
+	for _, frame := range match[1:] {
+		if frame != nil && (skipRe == nil || !skipRe.Match(frame)) {
+			frames = append(frames, string(frame))
+			break
+		}
+	}
+	return frames
 }
 
 func simpleLineParser(output []byte, oopses []*oops, params *stackParams, ignores []*regexp.Regexp) *Report {
@@ -513,5 +583,6 @@ func replace(where []byte, start, end int, what []byte) []byte {
 }
 
 var (
-	filenameRe = regexp.MustCompile(`[a-zA-Z0-9_\-\./]*[a-zA-Z0-9_\-]+\.(c|h):[0-9]+`)
+	filenameRe    = regexp.MustCompile(`[a-zA-Z0-9_\-\./]*[a-zA-Z0-9_\-]+\.(c|h):[0-9]+`)
+	reportFrameRe = regexp.MustCompile(`.* in ([a-zA-Z0-9_]+)`)
 )
