@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/osutil"
@@ -34,10 +35,11 @@ import (
 
 func main() {
 	var (
-		flagOS        = flag.String("os", runtime.GOOS, "target os")
-		flagArch      = flag.String("arch", runtime.GOARCH, "target arch")
-		flagKernelSrc = flag.String("kernel_src", "", "path to kernel sources")
-		flagKernelObj = flag.String("kernel_obj", "", "path to kernel build/obj dir")
+		flagOS             = flag.String("os", runtime.GOOS, "target os")
+		flagArch           = flag.String("arch", runtime.GOARCH, "target arch")
+		flagKernelSrc      = flag.String("kernel_src", "", "path to kernel sources")
+		flagKernelBuildSrc = flag.String("kernel_build_src", "", "path to kernel image's build dir (optional)")
+		flagKernelObj      = flag.String("kernel_obj", "", "path to kernel build/obj dir")
 	)
 	flag.Parse()
 
@@ -52,6 +54,9 @@ func main() {
 	if *flagKernelObj == "" {
 		*flagKernelObj = *flagKernelSrc
 	}
+	if *flagKernelBuildSrc == "" {
+		*flagKernelBuildSrc = *flagKernelSrc
+	}
 	target := targets.Get(*flagOS, *flagArch)
 	if target == nil {
 		failf("unknown target %v/%v", *flagOS, *flagArch)
@@ -61,12 +66,13 @@ func main() {
 		failf("%v", err)
 	}
 	kernelObj := filepath.Join(*flagKernelObj, target.KernelObject)
-	rg, err := cover.MakeReportGenerator(kernelObj, *flagKernelSrc, *flagArch)
+	rg, err := cover.MakeReportGenerator(kernelObj, *flagKernelSrc, *flagKernelBuildSrc, *flagArch)
 	if err != nil {
 		failf("%v", err)
 	}
+	progs := []cover.Prog{{PCs: pcs}}
 	buf := new(bytes.Buffer)
-	if err := rg.Do(buf, pcs); err != nil {
+	if err := rg.Do(buf, progs); err != nil {
 		failf("%v", err)
 	}
 	fn, err := osutil.TempFile("syz-cover")
@@ -90,7 +96,11 @@ func readPCs(files []string) ([]uint64, error) {
 			return nil, err
 		}
 		for s := bufio.NewScanner(bytes.NewReader(data)); s.Scan(); {
-			pc, err := strconv.ParseUint(s.Text(), 0, 64)
+			line := strings.TrimSpace(s.Text())
+			if line == "" {
+				continue
+			}
+			pc, err := strconv.ParseUint(line, 0, 64)
 			if err != nil {
 				return nil, err
 			}

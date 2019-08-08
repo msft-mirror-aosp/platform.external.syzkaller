@@ -82,15 +82,23 @@ func (env *Env) BuildSyzkaller(repo, commit string) error {
 	return nil
 }
 
-func (env *Env) BuildKernel(compilerBin, userspaceDir, cmdlineFile, sysctlFile string, kernelConfig []byte) error {
+func (env *Env) BuildKernel(compilerBin, userspaceDir, cmdlineFile, sysctlFile string,
+	kernelConfig []byte) (string, error) {
 	cfg := env.cfg
 	imageDir := filepath.Join(cfg.Workdir, "image")
 	if err := build.Image(cfg.TargetOS, cfg.TargetVMArch, cfg.Type,
 		cfg.KernelSrc, imageDir, compilerBin, userspaceDir,
 		cmdlineFile, sysctlFile, kernelConfig); err != nil {
-		return err
+		return "", err
 	}
-	return SetConfigImage(cfg, imageDir, true)
+	if err := SetConfigImage(cfg, imageDir, true); err != nil {
+		return "", err
+	}
+	kernelConfigFile := filepath.Join(imageDir, "kernel.config")
+	if !osutil.IsExist(kernelConfigFile) {
+		kernelConfigFile = ""
+	}
+	return kernelConfigFile, nil
 }
 
 func SetConfigImage(cfg *mgrconfig.Config, imageDir string, reliable bool) error {
@@ -115,6 +123,23 @@ func SetConfigImage(cfg *mgrconfig.Config, imageDir string, reliable bool) error
 		// Don't use preemptible VMs for image testing, patch testing and bisection.
 		vmConfig["preemptible"] = !reliable
 	}
+	vmCfg, err := json.Marshal(vmConfig)
+	if err != nil {
+		return fmt.Errorf("failed to serialize VM config: %v", err)
+	}
+	cfg.VM = vmCfg
+	return nil
+}
+
+func OverrideVMCount(cfg *mgrconfig.Config, n int) error {
+	vmConfig := make(map[string]interface{})
+	if err := json.Unmarshal(cfg.VM, &vmConfig); err != nil {
+		return fmt.Errorf("failed to parse VM config: %v", err)
+	}
+	if vmConfig["count"] == nil || !vm.AllowsOvercommit(cfg.Type) {
+		return nil
+	}
+	vmConfig["count"] = n
 	vmCfg, err := json.Marshal(vmConfig)
 	if err != nil {
 		return fmt.Errorf("failed to serialize VM config: %v", err)
@@ -201,7 +226,7 @@ func (inst *inst) test() error {
 		if bootErr, ok := err.(vm.BootErrorer); ok {
 			testErr.Title, testErr.Output = bootErr.BootError()
 			rep := inst.reporter.Parse(testErr.Output)
-			if rep != nil && rep.Title == report.UnexpectedKernelReboot {
+			if rep != nil && rep.Type == report.UnexpectedReboot {
 				// Avoid detecting any boot crash as "unexpected kernel reboot".
 				output := testErr.Output[rep.EndPos:]
 				if pos := bytes.IndexByte(testErr.Output[rep.StartPos:], '\n'); pos != -1 {
@@ -267,8 +292,8 @@ func (inst *inst) testInstance() error {
 		return &TestError{Title: fmt.Sprintf("failed to copy test binary to VM: %v", err)}
 	}
 
-	cmd := FuzzerCmd(fuzzerBin, executorBin, "test", inst.cfg.TargetOS, inst.cfg.TargetArch, fwdAddr,
-		inst.cfg.Sandbox, 0, 0, inst.cfg.Cover, false, true, false)
+	cmd := OldFuzzerCmd(fuzzerBin, executorBin, "test", inst.cfg.TargetOS, inst.cfg.TargetArch, fwdAddr,
+		inst.cfg.Sandbox, 0, inst.cfg.Cover, true)
 	outc, errc, err := inst.vm.Run(10*time.Minute, nil, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to run binary in VM: %v", err)
@@ -379,10 +404,18 @@ func FuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox string, procs,
 	if runtest {
 		runtestArg = " -runtest"
 	}
+	verbosityArg := ""
+	if verbosity != 0 {
+		verbosityArg = fmt.Sprintf(" -vv=%v", verbosity)
+	}
 	return fmt.Sprintf("%v -executor=%v -name=%v -arch=%v%v -manager=%v -sandbox=%v"+
-		" -procs=%v -v=%d -cover=%v -debug=%v -test=%v%v",
+		" -procs=%v -cover=%v -debug=%v -test=%v%v%v",
 		fuzzer, executor, name, arch, osArg, fwdAddr, sandbox,
-		procs, verbosity, cover, debug, test, runtestArg)
+		procs, cover, debug, test, runtestArg, verbosityArg)
+}
+
+func OldFuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox string, procs int, cover, test bool) string {
+	return FuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox, procs, 0, cover, false, test, false)
 }
 
 func ExecprogCmd(execprog, executor, OS, arch, sandbox string, repeat, threaded, collide bool,

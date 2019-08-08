@@ -16,29 +16,27 @@ import (
 
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/symbolizer"
-	"github.com/google/syzkaller/sys/targets"
 )
 
 type linux struct {
-	kernelSrc             string
-	kernelObj             string
+	*config
 	vmlinux               string
 	symbols               map[string][]symbolizer.Symbol
-	ignores               []*regexp.Regexp
 	consoleOutputRe       *regexp.Regexp
-	questionableRe        *regexp.Regexp
+	questionableRes       []*regexp.Regexp
 	taskContext           *regexp.Regexp
+	cpuContext            *regexp.Regexp
 	guiltyFileBlacklist   []*regexp.Regexp
 	reportStartIgnores    []*regexp.Regexp
 	infoMessagesWithStack [][]byte
 	eoi                   []byte
 }
 
-func ctorLinux(target *targets.Target, kernelSrc, kernelObj string, ignores []*regexp.Regexp) (Reporter, []string, error) {
+func ctorLinux(cfg *config) (Reporter, []string, error) {
 	var symbols map[string][]symbolizer.Symbol
 	vmlinux := ""
-	if kernelObj != "" {
-		vmlinux = filepath.Join(kernelObj, target.KernelObject)
+	if cfg.kernelObj != "" {
+		vmlinux = filepath.Join(cfg.kernelObj, cfg.target.KernelObject)
 		var err error
 		symbols, err = symbolizer.ReadSymbols(vmlinux)
 		if err != nil {
@@ -46,15 +44,17 @@ func ctorLinux(target *targets.Target, kernelSrc, kernelObj string, ignores []*r
 		}
 	}
 	ctx := &linux{
-		kernelSrc: kernelSrc,
-		kernelObj: kernelObj,
-		vmlinux:   vmlinux,
-		symbols:   symbols,
-		ignores:   ignores,
+		config:  cfg,
+		vmlinux: vmlinux,
+		symbols: symbols,
 	}
 	ctx.consoleOutputRe = regexp.MustCompile(`^(?:\*\* [0-9]+ printk messages dropped \*\* )?(?:.* login: )?(?:\<[0-9]+\>)?\[ *[0-9]+\.[0-9]+\](\[ *(?:C|T)[0-9]+\])? `)
-	ctx.questionableRe = regexp.MustCompile(`(\[\<[0-9a-f]+\>\])? \? +[a-zA-Z0-9_.]+\+0x[0-9a-f]+/[0-9a-f]+`)
+	ctx.questionableRes = []*regexp.Regexp{
+		regexp.MustCompile(`(\[\<[0-9a-f]+\>\])? \? +[a-zA-Z0-9_.]+\+0x[0-9a-f]+/[0-9a-f]+`),
+		regexp.MustCompile(`\(unreliable\)`), // powerpc
+	}
 	ctx.taskContext = regexp.MustCompile(`\[ *T[0-9]+\]`)
+	ctx.cpuContext = regexp.MustCompile(`\[ *C[0-9]+\]`)
 	ctx.eoi = []byte("<EOI>")
 	ctx.guiltyFileBlacklist = []*regexp.Regexp{
 		regexp.MustCompile(`.*\.h`),
@@ -178,9 +178,6 @@ func (ctx *linux) findFirstOops(output []byte) (oops *oops, startPos int, contex
 				oops = oops1
 				startPos = pos
 				context = ctx.extractContext(line)
-
-				//stripped, questionable := ctx.stripLinePrefix(line, context1)
-
 				return
 			}
 		}
@@ -201,7 +198,7 @@ func (ctx *linux) findReport(output []byte, oops *oops, startPos int, context st
 	}
 	secondReportPos := 0
 	textLines := 0
-	skipText := false
+	skipText, cpuTraceback := false, false
 	for pos, next := 0, 0; pos < len(output); pos = next + 1 {
 		next = bytes.IndexByte(output[pos:], '\n')
 		if next != -1 {
@@ -241,13 +238,19 @@ func (ctx *linux) findReport(output []byte, oops *oops, startPos int, context st
 				}
 			}
 		}
-		if !oopsLine && (context1 != context || questionable) {
+		if !oopsLine && (questionable ||
+			context1 != context && (!cpuTraceback || !ctx.cpuContext.MatchString(context1))) {
 			continue
 		}
 		textLines++
 		skipLine := skipText
 		if bytes.Contains(line, []byte("Disabling lock debugging due to kernel taint")) {
 			skipLine = true
+		} else if bytes.Contains(line, []byte("Sending NMI from CPU")) {
+			// If we are doing traceback of all CPUs, then we also need to preserve output
+			// from other CPUs regardless of what is the current context.
+			// Otherwise we will throw traceback away because it does not match the oops context.
+			cpuTraceback = true
 		} else if textLines > 25 &&
 			(bytes.Contains(line, []byte("Kernel panic - not syncing")) ||
 				bytes.Contains(line, []byte("WARNING: possible circular locking dependency detected"))) {
@@ -285,9 +288,13 @@ func (ctx *linux) stripLinePrefix(line []byte, context string) ([]byte, bool) {
 	if context == "" {
 		return line, false
 	}
-	questionable := ctx.questionableRe.Match(line) && !bytes.Contains(line, ctx.eoi)
 	start := bytes.Index(line, []byte("] ")) + 2
-	return line[start:], questionable
+	for _, re := range ctx.questionableRes {
+		if re.Match(line) && !bytes.Contains(line, ctx.eoi) {
+			return line[start:], true
+		}
+	}
+	return line[start:], false
 }
 
 func (ctx *linux) extractContext(line []byte) string {
@@ -323,14 +330,13 @@ func (ctx *linux) Symbolize(rep *Report) error {
 func (ctx *linux) symbolize(rep *Report) error {
 	symb := symbolizer.NewSymbolizer()
 	defer symb.Close()
-	strip := ctx.stripPrefix(symb)
 	var symbolized []byte
 	s := bufio.NewScanner(bytes.NewReader(rep.Report))
 	prefix := rep.reportPrefixLen
 	for s.Scan() {
 		line := append([]byte{}, s.Bytes()...)
 		line = append(line, '\n')
-		newLine := symbolizeLine(symb.Symbolize, ctx.symbols, ctx.vmlinux, strip, line)
+		newLine := symbolizeLine(symb.Symbolize, ctx.symbols, ctx.vmlinux, ctx.kernelBuildSrc, line)
 		if prefix > len(symbolized) {
 			prefix += len(newLine) - len(line)
 		}
@@ -339,33 +345,6 @@ func (ctx *linux) symbolize(rep *Report) error {
 	rep.Report = symbolized
 	rep.reportPrefixLen = prefix
 	return nil
-}
-
-func (ctx *linux) stripPrefix(symb *symbolizer.Symbolizer) string {
-	// Vmlinux may have been moved, so check if we can find debug info
-	// for some known functions and infer correct strip prefix from it.
-	knownSymbols := []struct {
-		symbol string
-		file   string
-	}{
-		{"__sanitizer_cov_trace_pc", "kernel/kcov.c"},
-		{"__asan_load1", "mm/kasan/kasan.c"},
-		{"start_kernel", "init/main.c"},
-	}
-	for _, s := range knownSymbols {
-		for _, covSymb := range ctx.symbols[s.symbol] {
-			frames, _ := symb.Symbolize(ctx.vmlinux, covSymb.Addr)
-			if len(frames) > 0 {
-				file := frames[len(frames)-1].File
-				if idx := strings.Index(file, s.file); idx != -1 {
-					return file[:idx]
-				}
-			}
-		}
-	}
-	// Strip vmlinux location from all paths.
-	strip, _ := filepath.Abs(ctx.vmlinux)
-	return filepath.Dir(strip) + string(filepath.Separator)
 }
 
 func symbolizeLine(symbFunc func(bin string, pc uint64) ([]symbolizer.Frame, error),
@@ -407,7 +386,7 @@ func symbolizeLine(symbFunc func(bin string, pc uint64) ([]symbolizer.Frame, err
 	for _, frame := range frames {
 		file := frame.File
 		file = strings.TrimPrefix(file, strip)
-		file = strings.TrimPrefix(file, "./")
+		file = strings.TrimLeft(file, "./")
 		info := fmt.Sprintf(" %v:%v", file, frame.Line)
 		modified := append([]byte{}, line...)
 		modified = replace(modified, match[7], match[7], []byte(info))
@@ -507,6 +486,10 @@ func (ctx *linux) isCorrupted(title string, report []byte, format oopsFormat) (b
 		if re.MatchString(title) {
 			return true, "title matches corrupted regexp"
 		}
+	}
+	// If the report hasn't matched any of the oops titles, don't mark it as corrupted.
+	if format.title == nil {
+		return false, ""
 	}
 	// Check if the report contains stack trace.
 	if !format.noStackTrace && !bytes.Contains(report, []byte("Call Trace")) &&
@@ -652,7 +635,7 @@ var linuxStallAnchorFrames = []*regexp.Regexp{
 
 var (
 	linuxSymbolizeRe = regexp.MustCompile(`(?:\[\<(?:[0-9a-f]+)\>\])?[ \t]+(?:[0-9]+:)?([a-zA-Z0-9_.]+)\+0x([0-9a-f]+)/0x([0-9a-f]+)`)
-	stackFrameRe     = regexp.MustCompile(`^ *(?:\[\<(?:[0-9a-f]+)\>\])?[ \t]+(?:[0-9]+:)?([a-zA-Z0-9_.]+)\+0x([0-9a-f]+)/0x([0-9a-f]+)`)
+	stackFrameRe     = regexp.MustCompile(`^ *(?:\[\<?(?:[0-9a-f]+)\>?\] ?){0,2}[ \t]+(?:[0-9]+:)?([a-zA-Z0-9_.]+)\+0x([0-9a-f]+)/0x([0-9a-f]+)`)
 	linuxRcuStall    = compile("INFO: rcu_(?:preempt|sched|bh) (?:self-)?detected(?: expedited)? stall")
 	linuxRipFrame    = compile(`IP: (?:(?:[0-9]+:)?(?:{{PC}} +){0,2}{{FUNC}}|[0-9]+:0x[0-9a-f]+|(?:[0-9]+:)?{{PC}} +\[< *\(null\)>\] +\(null\)|[0-9]+: +\(null\))`)
 )
@@ -675,7 +658,7 @@ var linuxStackKeywords = []*regexp.Regexp{
 var linuxStackParams = &stackParams{
 	stackStartRes: linuxStackKeywords,
 	frameRes: []*regexp.Regexp{
-		compile("^ +(?:{{PC}} )?{{FUNC}}"),
+		compile("^ *(?:{{PC}} ){0,2}{{FUNC}}"),
 	},
 	skipPatterns: []string{
 		"__sanitizer",
@@ -703,7 +686,8 @@ var linuxStackParams = &stackParams{
 		"perf_trace",
 		"lock_acquire",
 		"lock_release",
-		"register_lock_class",
+		"lock_class",
+		"reacquire_held_locks",
 		"spin_lock",
 		"spin_trylock",
 		"spin_unlock",
@@ -723,6 +707,13 @@ var linuxStackParams = &stackParams{
 		"mutex_unlock",
 		"osq_lock",
 		"osq_unlock",
+		"__wake_up",
+		"refcount_add",
+		"refcount_sub",
+		"refcount_inc",
+		"refcount_dec",
+		"refcount_set",
+		"refcount_read",
 		"memcpy",
 		"memcmp",
 		"memset",
@@ -764,22 +755,25 @@ var linuxStackParams = &stackParams{
 		"dev_alert",
 		"dev_crit",
 		"dev_emerg",
+		"program_check_exception",
+		"program_check_common",
+		"del_timer_sync",
 	},
 	corruptedLines: []*regexp.Regexp{
 		// Fault injection stacks are frequently intermixed with crash reports.
 		// Note: the actual symbol can have all kinds of weird suffixes like ".isra.7", ".cold" or ".isra.56.cold.74".
-		compile(`^ should_fail(slab)?(\.[a-z0-9.]+)?\+0x`),
+		compile(`^( \[\<?(?:0x)?[0-9a-f]+\>?\])? should_fail(slab)?(\.[a-z0-9.]+)?\+0x`),
 	},
 }
-
-const MemoryLeakPrefix = "memory leak in "
 
 func warningStackFmt(skip ...string) *stackFmt {
 	return &stackFmt{
 		// In newer kernels WARNING traps and actual stack starts after invalid_op frame,
 		// older kernels just print stack.
 		parts: []*regexp.Regexp{
-			linuxRipFrame,
+			// x86_64 warning stack starts with "RIP:" line,
+			// while powerpc64 starts with "--- interrupt:".
+			compile("(?:" + linuxRipFrame.String() + "|--- interrupt: [0-9]+ at {{FUNC}})"),
 			parseStackTrace,
 		},
 		parts2: []*regexp.Regexp{
@@ -830,6 +824,12 @@ var linuxOopses = []*oops{
 				corrupted: true,
 			},
 			{
+				title:  compile("BUG: KMSAN: kernel-usb-infoleak"),
+				report: compile("BUG: KMSAN: kernel-usb-infoleak in {{FUNC}}"),
+				fmt:    "KMSAN: kernel-usb-infoleak in %[2]v",
+				stack:  warningStackFmt("usb_submit_urb", "usb_start_wait_urb", "usb_bulk_msg", "usb_interrupt_msg", "usb_control_msg"),
+			},
+			{
 				title:  compile("BUG: KMSAN:"),
 				report: compile("BUG: KMSAN: ([a-z\\-]+) in {{FUNC}}"),
 				fmt:    "KMSAN: %[1]v in %[3]v",
@@ -841,7 +841,7 @@ var linuxOopses = []*oops{
 				},
 			},
 			{
-				title: compile("BUG: unable to handle kernel paging request"),
+				title: compile("BUG: (?:unable to handle kernel paging request|unable to handle page fault for address)"),
 				fmt:   "BUG: unable to handle kernel paging request in %[1]v",
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
@@ -852,7 +852,7 @@ var linuxOopses = []*oops{
 				},
 			},
 			{
-				title: compile("BUG: unable to handle kernel NULL pointer dereference"),
+				title: compile("BUG: (?:unable to handle kernel NULL pointer dereference|kernel NULL pointer dereference)"),
 				fmt:   "BUG: unable to handle kernel NULL pointer dereference in %[1]v",
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
@@ -975,7 +975,7 @@ var linuxOopses = []*oops{
 			},
 			{
 				title: compile("BUG: memory leak"),
-				fmt:   MemoryLeakPrefix + "%[1]v",
+				fmt:   memoryLeakPrefix + "%[1]v",
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
 						compile("backtrace:"),
@@ -986,6 +986,21 @@ var linuxOopses = []*oops{
 						"idr_get", "list_lru_init", "kasprintf", "kvasprintf",
 						"pcpu_create", "strdup", "strndup", "memdup"},
 				},
+			},
+			{
+				title: compile("BUG: stack guard page was hit at"),
+				fmt:   "BUG: stack guard page was hit in %[1]v",
+				stack: &stackFmt{
+					parts: []*regexp.Regexp{
+						linuxRipFrame,
+					},
+				},
+				noStackTrace: true,
+			},
+			{
+				title:     compile(`BUG:[[:space:]]*(?:\n|$)`),
+				fmt:       "BUG: corrupted",
+				corrupted: true,
 			},
 		},
 		[]*regexp.Regexp{
@@ -1032,7 +1047,7 @@ var linuxOopses = []*oops{
 			{
 				title: compile("WARNING: .*kernel/locking/lockdep\\.c.*lock_"),
 				fmt:   "WARNING: locking bug in %[1]v",
-				stack: warningStackFmt(),
+				stack: warningStackFmt("lock_sock", "release_sock"),
 			},
 			{
 				title:        compile("WARNING: lock held when returning to user space"),
@@ -1047,8 +1062,14 @@ var linuxOopses = []*oops{
 					"vmalloc", "slab", "kmem"),
 			},
 			{
+				title: compile("WARNING: .* usb_submit_urb"),
+				fmt:   "WARNING in %[1]v/usb_submit_urb",
+				stack: warningStackFmt("usb_submit_urb", "usb_start_wait_urb", "usb_bulk_msg", "usb_interrupt_msg", "usb_control_msg"),
+			},
+			{
 				title: compile("WARNING: .* at {{SRC}} {{FUNC}}"),
-				fmt:   "WARNING in %[2]v",
+				fmt:   "WARNING in %[3]v",
+				stack: warningStackFmt(),
 			},
 			{
 				title:  compile("WARNING: possible circular locking dependency detected"),
@@ -1105,7 +1126,7 @@ var linuxOopses = []*oops{
 			},
 			{
 				title:  compile("WARNING: held lock freed!"),
-				report: compile("WARNING: held lock freed!(?:.*\\n)+?.*{{PC}} +{{FUNC}}"),
+				report: compile("WARNING: held lock freed!(?:.*\\n)+?.*at:(?: {{PC}})? +{{FUNC}}"),
 				fmt:    "WARNING: held lock freed in %[1]v",
 			},
 			{
@@ -1117,6 +1138,11 @@ var linuxOopses = []*oops{
 				title:        compile("WARNING: kernel stack frame pointer .* has bad value"),
 				fmt:          "WARNING: kernel stack regs has bad value",
 				noStackTrace: true,
+			},
+			{
+				title:     compile(`WARNING:[[:space:]]*(?:\n|$)`),
+				fmt:       "WARNING: corrupted",
+				corrupted: true,
 			},
 		},
 		[]*regexp.Regexp{
@@ -1201,13 +1227,19 @@ var linuxOopses = []*oops{
 						parseStackTrace,
 					},
 					skip: []string{"sched", "_lock", "down", "completion", "kthread",
-						"wait", "synchronize", "context_switch"},
+						"wait", "synchronize", "context_switch", "__switch_to",
+					},
 				},
 			},
 			{
 				// This gets captured for corrupted old-style KASAN reports.
 				title:     compile("INFO: (Freed|Allocated) in (.*)"),
 				fmt:       "INFO: %[1]v in %[2]v",
+				corrupted: true,
+			},
+			{
+				title:     compile(`INFO:[[:space:]]*(?:\n|$)`),
+				fmt:       "INFO: corrupted",
 				corrupted: true,
 			},
 		},
@@ -1346,11 +1378,22 @@ var linuxOopses = []*oops{
 						compile("Call Trace:"),
 						parseStackTrace,
 					},
+					skip: []string{"usercopy", "__check"},
 				},
 			},
 			{
 				title: compile("kernel BUG at lib/list_debug.c"),
 				fmt:   "BUG: corrupted list in %[1]v",
+				stack: &stackFmt{
+					parts: []*regexp.Regexp{
+						compile("Call Trace:"),
+						parseStackTrace,
+					},
+				},
+			},
+			{
+				title: compile("kernel BUG at (.*)"),
+				fmt:   "kernel BUG at %[1]v",
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
 						compile("Call Trace:"),
@@ -1426,7 +1469,7 @@ var linuxOopses = []*oops{
 		[]oopsFormat{
 			{
 				title:        compile("Booting the kernel."),
-				fmt:          UnexpectedKernelReboot,
+				fmt:          unexpectedKernelReboot,
 				noStackTrace: true,
 			},
 		},
