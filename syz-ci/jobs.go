@@ -20,6 +20,7 @@ import (
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
+	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/pkg/vcs"
 	"github.com/google/syzkaller/vm"
 )
@@ -364,6 +365,11 @@ func (jp *JobProcessor) process(job *Job) *dashapi.JobDoneReq {
 func (jp *JobProcessor) bisect(job *Job, mgrcfg *mgrconfig.Config) error {
 	req, resp, mgr := job.req, job.resp, job.mgr
 
+	// Hack: if the manager has only, say, 5 VMs, but bisect wants 10, try to override number of VMs to 10.
+	// OverrideVMCount is opportunistic and should do it only if it's safe.
+	if err := instance.OverrideVMCount(mgrcfg, bisect.NumTests); err != nil {
+		return err
+	}
 	trace := new(bytes.Buffer)
 	cfg := &bisect.Config{
 		Trace:    io.MultiWriter(trace, log.VerboseWriter(3)),
@@ -463,20 +469,35 @@ func (jp *JobProcessor) testPatch(job *Job, mgrcfg *mgrconfig.Config) error {
 	}
 
 	log.Logf(0, "job: building kernel...")
-	if err := env.BuildKernel(mgr.mgrcfg.Compiler, mgr.mgrcfg.Userspace, mgr.mgrcfg.KernelCmdline,
-		mgr.mgrcfg.KernelSysctl, req.KernelConfig); err != nil {
+	kernelConfig, err := env.BuildKernel(mgr.mgrcfg.Compiler, mgr.mgrcfg.Userspace, mgr.mgrcfg.KernelCmdline,
+		mgr.mgrcfg.KernelSysctl, req.KernelConfig)
+	if err != nil {
 		return err
 	}
-	resp.Build.KernelConfig, err = ioutil.ReadFile(filepath.Join(mgrcfg.KernelSrc, ".config"))
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %v", err)
+	if kernelConfig != "" {
+		resp.Build.KernelConfig, err = ioutil.ReadFile(kernelConfig)
+		if err != nil {
+			return fmt.Errorf("failed to read config file: %v", err)
+		}
 	}
-
 	log.Logf(0, "job: testing...")
 	results, err := env.Test(3, req.ReproSyz, req.ReproOpts, req.ReproC)
 	if err != nil {
 		return err
 	}
+	rep, err := aggregateTestResults(results)
+	if err != nil {
+		return err
+	}
+	if rep != nil {
+		resp.CrashTitle = rep.Title
+		resp.CrashReport = rep.Report
+		resp.CrashLog = rep.Output
+	}
+	return nil
+}
+
+func aggregateTestResults(results []error) (*report.Report, error) {
 	// We can have transient errors and other errors of different types.
 	// We need to avoid reporting transient "failed to boot" or "failed to copy binary" errors.
 	// If any of the instances crash during testing, we report this with the highest priority.
@@ -484,6 +505,7 @@ func (jp *JobProcessor) testPatch(job *Job, mgrcfg *mgrconfig.Config) error {
 	// If all instances failed to boot, then we report one of these errors.
 	anySuccess := false
 	var anyErr, testErr error
+	var resReport *report.Report
 	for _, res := range results {
 		if res == nil {
 			anySuccess = true
@@ -500,19 +522,21 @@ func (jp *JobProcessor) testPatch(job *Job, mgrcfg *mgrconfig.Config) error {
 				testErr = fmt.Errorf("%v\n\n%s", err.Title, err.Output)
 			}
 		case *instance.CrashError:
-			resp.CrashTitle = err.Report.Title
-			resp.CrashReport = err.Report.Report
-			resp.CrashLog = err.Report.Output
-			return nil
+			if resReport == nil || (len(resReport.Report) == 0 && len(err.Report.Report) != 0) {
+				resReport = err.Report
+			}
 		}
 	}
+	if resReport != nil {
+		return resReport, nil
+	}
 	if anySuccess {
-		return nil
+		return nil, nil
 	}
 	if testErr != nil {
-		return testErr
+		return nil, testErr
 	}
-	return anyErr
+	return nil, anyErr
 }
 
 // Errorf logs non-fatal error and sends it to dashboard.

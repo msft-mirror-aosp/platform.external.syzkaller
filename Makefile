@@ -45,8 +45,9 @@ TARGETGOOS := $(TARGETOS)
 TARGETGOARCH := $(TARGETVMARCH)
 
 ifeq ("$(TARGETOS)", "fuchsia")
-	# SOURCEDIR should point to fuchsia checkout.
-	GO = "$(SOURCEDIR)/tools/devshell/contrib/go"
+# SOURCEDIR should point to fuchsia checkout.
+export FX_SRC_PATH=$(SOURCEDIR)
+	GO = "tools/fuchsia/go"
 endif
 
 GITREV=$(shell git rev-parse HEAD)
@@ -97,7 +98,8 @@ endif
 	arch_freebsd_amd64_host arch_netbsd_amd64_host \
 	arch_linux_amd64_target arch_linux_386_target \
 	arch_linux_arm64_target arch_linux_arm_target arch_linux_ppc64le_target \
-	arch_freebsd_amd64_target arch_netbsd_amd64_target arch_windows_amd64_target \
+	arch_freebsd_amd64_target arch_freebsd_386_target \
+	arch_netbsd_amd64_target arch_windows_amd64_target \
 	arch_test presubmit presubmit_parallel clean
 
 all: host target
@@ -201,6 +203,12 @@ ifeq ($(TARGETOS),fuchsia)
 else
 endif
 
+fuchsia_go:
+ifeq ($(TARGETOS),fuchsia)
+	./tools/fuchsia/build-go.sh
+else
+endif
+
 generate_trace2syz:
 	(cd tools/syz-trace2syz/parser; ragel -Z -G2 -o lex.go straceLex.rl)
 	(cd tools/syz-trace2syz/parser; goyacc -o strace.go -p Strace -v="" strace.y)
@@ -230,26 +238,15 @@ tidy:
 	# Just check for compiler warnings.
 	$(CC) executor/test_executor.cc -c -o /dev/null -Wparentheses -Wno-unused -Wall
 
-gometalinter:
-ifeq ($(TRAVIS),)
-	env CGO_ENABLED=1 gometalinter.v2 ./...
-else
-	# GOMAXPROCS/GOGC settings help to reduce memory usage,
-	# otherwise this gets OOM-killed on travis.
-	env CGO_ENABLED=1 GOMAXPROCS=1 GOGC=50 gometalinter.v2 ./...
-endif
-
 lint:
-	# To install run:
-	# go get -u github.com/golangci/golangci-lint/cmd/golangci-lint
-	# Currently it consumes too much memory to run on Travis (see #977).
 	golangci-lint run ./...
 
 arch: arch_darwin_amd64_host arch_linux_amd64_host arch_freebsd_amd64_host \
 	arch_netbsd_amd64_host arch_openbsd_amd64_host \
 	arch_linux_amd64_target arch_linux_386_target \
 	arch_linux_arm64_target arch_linux_arm_target arch_linux_ppc64le_target \
-	arch_freebsd_amd64_target arch_netbsd_amd64_target arch_openbsd_amd64_target \
+	arch_freebsd_amd64_target arch_freebsd_386_target \
+	arch_netbsd_amd64_target arch_openbsd_amd64_target \
 	arch_windows_amd64_target arch_test
 
 arch_darwin_amd64_host:
@@ -262,19 +259,13 @@ arch_linux_amd64_target:
 	env TARGETOS=linux TARGETARCH=amd64 $(MAKE) target
 
 arch_linux_386_target:
-	# executor build on 386 on travis fails with:
-	# fatal error: asm/errno.h: No such file or directory
-	# We install a bunch of additional packages in .travis.yml,
-	# but I can't guess the right one.
-	env TARGETOS=linux TARGETARCH=amd64 TARGETVMARCH=386 $(MAKE) target
+	env TARGETOS=linux TARGETARCH=386 $(MAKE) target
 
 arch_linux_arm64_target:
 	env TARGETOS=linux TARGETARCH=arm64 $(MAKE) target
 
 arch_linux_arm_target:
-	# executor build on arm fails with:
-	# Error: alignment too large: 15 assumed
-	env TARGETOS=linux TARGETARCH=arm64 TARGETVMARCH=arm $(MAKE) target
+	env TARGETOS=linux TARGETARCH=arm $(MAKE) target
 
 arch_linux_ppc64le_target:
 	env TARGETOS=linux TARGETARCH=ppc64le $(MAKE) target
@@ -284,6 +275,9 @@ arch_freebsd_amd64_host:
 
 arch_freebsd_amd64_target:
 	env TARGETOS=freebsd TARGETARCH=amd64 $(MAKE) target
+
+arch_freebsd_386_target:
+	env TARGETOS=freebsd TARGETARCH=386 $(MAKE) target
 
 arch_netbsd_amd64_host:
 	env HOSTOS=netbsd HOSTARCH=amd64 $(MAKE) host
@@ -304,18 +298,15 @@ arch_windows_amd64_target:
 arch_test:
 	env TARGETOS=test TARGETARCH=64 $(MAKE) executor
 	env TARGETOS=test TARGETARCH=64_fork $(MAKE) executor
-	# 32-bit build fails on travis with:
-	# /usr/include/c++/4.8/utility:68:28: fatal error: bits/c++config.h: No such file or directory
-	# #include <bits/c++config.h>
-	# env TARGETOS=test TARGETARCH=32_shmem $(MAKE) executor
-	# env TARGETOS=test TARGETARCH=32_fork_shmem $(MAKE) executor
+	env TARGETOS=test TARGETARCH=32_shmem $(MAKE) executor
+	env TARGETOS=test TARGETARCH=32_fork_shmem $(MAKE) executor
 
 presubmit:
 	$(MAKE) generate
 	$(MAKE) check_diff
 	$(GO) install ./...
 	$(MAKE) presubmit_parallel
-	$(MAKE) gometalinter
+	$(MAKE) lint
 	echo LGTM
 
 presubmit_parallel: test test_race arch check_links
@@ -339,7 +330,7 @@ clean:
 
 # For a tupical Ubuntu/Debian distribution.
 # We use "|| true" for apt-get install because packages are all different on different distros,
-# and we want to install at least gometalinter on Travis CI.
+# and we want to install at least golangci-lint on Travis CI.
 install_prerequisites:
 	uname -a
 	sudo apt-get update
@@ -348,10 +339,10 @@ install_prerequisites:
 	sudo apt-get install -y -q g++-aarch64-linux-gnu || true
 	sudo apt-get install -y -q g++-powerpc64le-linux-gnu || true
 	sudo apt-get install -y -q g++-arm-linux-gnueabi || true
-	sudo apt-get install -y -q ragel
-	go get -u golang.org/x/tools/cmd/goyacc
-	go get -u gopkg.in/alecthomas/gometalinter.v2
-	gometalinter.v2 --install
+	sudo apt-get install -y -q ragel clang-format
+	go get -u golang.org/x/tools/cmd/goyacc \
+		github.com/golangci/golangci-lint/cmd/golangci-lint \
+		github.com/dvyukov/go-fuzz/go-fuzz-build
 
 check_links:
 	python ./tools/check_links.py $$(pwd) $$(ls ./*.md; find ./docs/ -name '*.md')

@@ -53,8 +53,8 @@ include <uapi/linux/membarrier.h>
 include <uapi/linux/capability.h>
 include <uapi/linux/suspend_ioctls.h>
 
-resource fd[int32]: -1, AT_FDCWD
-resource fd_dir[fd]
+resource fd[int32]: -1
+resource fd_dir[fd]: AT_FDCWD
 
 type signalno int32[0:65]
 
@@ -471,7 +471,6 @@ openat$mixer(fd const[AT_FDCWD], file ptr[in, string["/dev/mixer"]], flags flags
 openat$irnet(fd const[AT_FDCWD], file ptr[in, string["/dev/irnet"]], flags flags[open_flags], mode const[0]) fd
 openat$hwrng(fd const[AT_FDCWD], file ptr[in, string["/dev/hwrng"]], flags flags[open_flags], mode const[0]) fd
 openat$hpet(fd const[AT_FDCWD], file ptr[in, string["/dev/hpet"]], flags flags[open_flags], mode const[0]) fd
-openat$hidraw0(fd const[AT_FDCWD], file ptr[in, string["/dev/hidraw0"]], flags flags[open_flags], mode const[0]) fd
 openat$fb0(fd const[AT_FDCWD], file ptr[in, string["/dev/fb0"]], flags flags[open_flags], mode const[0]) fd
 openat$autofs(fd const[AT_FDCWD], file ptr[in, string["/dev/autofs"]], flags flags[open_flags], mode const[0]) fd
 openat$keychord(fd const[AT_FDCWD], file ptr[in, string["/dev/keychord"]], flags flags[open_flags], mode const[0]) fd
@@ -488,7 +487,6 @@ openat$xenevtchn(fd const[AT_FDCWD], file ptr[in, string["/dev/xen/evtchn"]], fl
 openat$dlm_control(fd const[AT_FDCWD], file ptr[in, string["/dev/dlm-control"]], flags flags[open_flags], mode const[0]) fd
 openat$dlm_monitor(fd const[AT_FDCWD], file ptr[in, string["/dev/dlm-monitor"]], flags flags[open_flags], mode const[0]) fd
 openat$dlm_plock(fd const[AT_FDCWD], file ptr[in, string["/dev/dlm_plock"]], flags flags[open_flags], mode const[0]) fd
-openat$vfio(fd const[AT_FDCWD], file ptr[in, string["/dev/vfio/vfio"]], flags flags[open_flags], mode const[0]) fd
 openat$btrfs_control(fd const[AT_FDCWD], file ptr[in, string["/dev/btrfs-control"]], flags flags[open_flags], mode const[0]) fd
 openat$ubi_ctrl(fd const[AT_FDCWD], file ptr[in, string["/dev/ubi_ctrl"]], flags flags[open_flags], mode const[0]) fd
 openat$cachefiles(fd const[AT_FDCWD], file ptr[in, string["/dev/cachefiles"]], flags flags[open_flags], mode const[0]) fd
@@ -805,7 +803,7 @@ user_desc_bases = 0, 4096, 1048576, 536870912, 536872960, 536875008, -1
 user_desc_limits = 0, 1024, 4096, 8192, 16384, -1
 
 sched_attr {
-	size	flags[sched_attr_size, int32]
+	size	bytesize[parent, int32]
 	policy	flags[sched_policy, int32]
 	flags	flags[sched_attr_flags2, int64]
 	nice	int32
@@ -906,7 +904,6 @@ priority_which = PRIO_PROCESS, PRIO_PGRP, PRIO_USER
 sched_policy = SCHED_NORMAL, SCHED_BATCH, SCHED_IDLE, SCHED_FIFO, SCHED_RR, SCHED_DEADLINE
 sched_attr_flags = 0
 sched_attr_flags2 = 0, SCHED_FLAG_RESET_ON_FORK
-sched_attr_size = 48
 mempolicy_flags = 0, MPOL_F_MEMS_ALLOWED, MPOL_F_ADDR, MPOL_F_NODE
 ptrace_req = PTRACE_LISTEN, PTRACE_KILL, PTRACE_INTERRUPT, PTRACE_ATTACH, PTRACE_DETACH
 ptrace_req_peek = PTRACE_PEEKTEXT, PTRACE_PEEKDATA
@@ -933,7 +930,7 @@ fcntl_rw_hint = RWF_WRITE_LIFE_NOT_SET, RWH_WRITE_LIFE_NONE, RWH_WRITE_LIFE_SHOR
 fiemap_flags = FIEMAP_FLAG_SYNC, FIEMAP_FLAG_XATTR, FIEMAP_FLAG_CACHE
 fiemap_extent_flags = FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNKNOWN, FIEMAP_EXTENT_DELALLOC, FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_DATA_ENCRYPTED, FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_DATA_TAIL, FIEMAP_EXTENT_UNWRITTEN, FIEMAP_EXTENT_MERGED, FIEMAP_EXTENT_SHARED
 getrandom_flags = GRND_NONBLOCK, GRND_RANDOM
-clone_flags = CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND, CLONE_PTRACE, CLONE_VFORK, CLONE_PARENT, CLONE_THREAD, CLONE_NEWNS, CLONE_SYSVSEM, CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID, CLONE_UNTRACED, CLONE_CHILD_SETTID, CLONE_NEWCGROUP, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET, CLONE_IO
+clone_flags = CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND, CLONE_PTRACE, CLONE_VFORK, CLONE_PARENT, CLONE_THREAD, CLONE_NEWNS, CLONE_SYSVSEM, CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID, CLONE_UNTRACED, CLONE_CHILD_SETTID, CLONE_NEWCGROUP, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET, CLONE_IO, CLONE_PIDFD
 
 # adjtimex flags.
 _ = STA_PLL, STA_PPSFREQ, STA_PPSTIME, STA_FLL, STA_INS, STA_DEL, STA_UNSYNC, STA_FREQHOLD, STA_PPSSIGNAL, STA_PPSJITTER, STA_PPSWANDER, STA_PPSERROR, STA_CLOCKERR, STA_NANO, STA_MODE, STA_CLK, STA_RONLY
