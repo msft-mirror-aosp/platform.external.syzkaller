@@ -28,16 +28,25 @@ func init() {
 }
 
 type Config struct {
-	Count       int    `json:"count"`        // number of VMs to use
-	Qemu        string `json:"qemu"`         // qemu binary name (qemu-system-arch by default)
-	QemuArgs    string `json:"qemu_args"`    // additional command line arguments for qemu binary
-	Kernel      string `json:"kernel"`       // kernel for injected boot (e.g. arch/x86/boot/bzImage)
-	Cmdline     string `json:"cmdline"`      // kernel command line (can only be specified with kernel)
-	Initrd      string `json:"initrd"`       // linux initial ramdisk. (optional)
-	ImageDevice string `json:"image_device"` // qemu image device (hda by default)
-	CPU         int    `json:"cpu"`          // number of VM CPUs
-	Mem         int    `json:"mem"`          // amount of VM memory in MBs
-	Snapshot    bool   `json:"snapshot"`     // For building kernels without -snapshot (for pkg/build)
+	Count    int    `json:"count"`     // number of VMs to run in parallel
+	Qemu     string `json:"qemu"`      // qemu binary name (qemu-system-arch by default)
+	QemuArgs string `json:"qemu_args"` // additional command line arguments for qemu binary
+	// Location of the kernel for injected boot (e.g. arch/x86/boot/bzImage, optional).
+	// This is passed to qemu as the -kernel option.
+	Kernel string `json:"kernel"`
+	// Additional command line options for the booting kernel, for example `root=/dev/sda1`.
+	// Can only be specified with kernel.
+	Cmdline string `json:"cmdline"`
+	Initrd  string `json:"initrd"` // linux initial ramdisk. (optional)
+	// qemu image device.
+	// The default value "hda" is transformed to "-hda image" for qemu.
+	// The modern way of describing qemu hard disks is supported, so the value
+	// "drive index=0,media=disk,file=" is transformed to "-drive index=0,media=disk,file=image"
+	// for qemu.
+	ImageDevice string `json:"image_device"`
+	CPU         int    `json:"cpu"`      // number of VM CPUs
+	Mem         int    `json:"mem"`      // amount of VM memory in MiB
+	Snapshot    bool   `json:"snapshot"` // For building kernels without -snapshot (for pkg/build)
 }
 
 type Pool struct {
@@ -337,9 +346,15 @@ func (inst *instance) boot() error {
 			"-device", "virtio-9p-pci,fsdev=fsdev0,mount_tag=/dev/root",
 		)
 	} else if inst.image != "" {
-		args = append(args,
-			"-"+inst.cfg.ImageDevice, inst.image,
-		)
+		// inst.cfg.ImageDevice can contain spaces
+		imgline := strings.Split(inst.cfg.ImageDevice, " ")
+		imgline[0] = "-" + imgline[0]
+		if strings.HasSuffix(imgline[len(imgline)-1], "file=") {
+			imgline[len(imgline)-1] = imgline[len(imgline)-1] + inst.image
+		} else {
+			imgline = append(imgline, inst.image)
+		}
+		args = append(args, imgline...)
 		if inst.cfg.Snapshot {
 			args = append(args, "-snapshot")
 		}

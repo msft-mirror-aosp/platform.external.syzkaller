@@ -11,6 +11,7 @@ include <linux/socket.h>
 include <uapi/linux/in.h>
 include <uapi/linux/ethtool.h>
 include <uapi/linux/if_ether.h>
+include <uapi/asm-generic/socket.h>
 
 resource sock[fd]
 type sock_port int16be[20000:20004]
@@ -134,9 +135,24 @@ send_msghdr {
 	msg_flags	const[0, int32]
 }
 
+msghdr_sock {
+	msg_name	ptr[in, sockaddr_storage, opt]
+	msg_namelen	len[msg_name, int32]
+	msg_iov		ptr[in, array[iovec_in]]
+	msg_iovlen	len[msg_iov, intptr]
+	msg_control	ptr[in, array[cmsghdr_sock], opt]
+	msg_controllen	bytesize[msg_control, intptr]
+	msg_flags	const[0, int32]
+}
+
 send_mmsghdr {
 	msg_hdr	send_msghdr
-	msg_len	int32
+	msg_len	const[0, int32]
+}
+
+mmsghdr_sock {
+	msg_hdr	msghdr_sock
+	msg_len	const[0, int32]
 }
 
 recv_msghdr {
@@ -161,6 +177,24 @@ cmsghdr {
 	data		array[int8]
 } [align_ptr]
 
+type cmsghdr_t[SOL, TYP, DATA] {
+	unaligned	cmsghdr_unaligned[SOL, TYP, DATA]
+} [align_ptr]
+
+type cmsghdr_unaligned[SOL, TYP, DATA] {
+	cmsg_len	len[parent, intptr]
+	cmsg_level	const[SOL, int32]
+	cmsg_type	const[TYP, int32]
+	data		DATA
+} [packed]
+
+# For __sock_cmsg_send
+cmsghdr_sock [
+	mark		cmsghdr_t[SOL_SOCKET, SO_MARK, int32]
+	timestamping	cmsghdr_t[SOL_SOCKET, SO_TIMESTAMPING_OLD, int32]
+	txtime		cmsghdr_t[SOL_SOCKET, SCM_TXTIME, int64]
+] [varlen]
+
 # Socket options
 
 # http://lxr.free-electrons.com/source/include/uapi/asm-generic/socket.h
@@ -175,8 +209,10 @@ setsockopt$sock_cred(fd sock, level const[SOL_SOCKET], optname const[SO_PEERCRED
 getsockopt$sock_timeval(fd sock, level const[SOL_SOCKET], optname flags[sockopt_opt_sock_timeval], optval ptr[out, timeval], optlen ptr[inout, len[optval, int32]])
 setsockopt$sock_timeval(fd sock, level const[SOL_SOCKET], optname flags[sockopt_opt_sock_timeval], optval ptr[in, timeval], optlen len[optval])
 setsockopt$sock_attach_bpf(fd sock, level const[SOL_SOCKET], optname const[SO_ATTACH_BPF], optval ptr[in, fd_bpf_prog], optlen len[optval])
-setsockopt$SO_TIMESTAMPING(fd sock, level const[SOL_SOCKET], optname const[SO_TIMESTAMPING_OLD], optval ptr[in, flags[sockopt_so_timestamping, int32]], optlen len[optval])
-getsockopt$SO_TIMESTAMPING(fd sock, level const[SOL_SOCKET], optname const[SO_TIMESTAMPING_OLD], optval ptr[out, int32], optlen ptr[inout, len[optval, int32]])
+setsockopt$SO_TIMESTAMP(fd sock, level const[SOL_SOCKET], optname flags[sockopt_opt_sock_timestamp], optval ptr[in, int32], optlen len[optval])
+getsockopt$SO_TIMESTAMP(fd sock, level const[SOL_SOCKET], optname flags[sockopt_opt_sock_timestamp], optval ptr[out, int32], optlen ptr[inout, len[optval, int32]])
+setsockopt$SO_TIMESTAMPING(fd sock, level const[SOL_SOCKET], optname flags[sockopt_opt_sock_timestamping], optval ptr[in, flags[sockopt_so_timestamping, int32]], optlen len[optval])
+getsockopt$SO_TIMESTAMPING(fd sock, level const[SOL_SOCKET], optname flags[sockopt_opt_sock_timestamping], optval ptr[out, int32], optlen ptr[inout, len[optval, int32]])
 setsockopt$SO_ATTACH_FILTER(fd sock, level const[SOL_SOCKET], optname const[SO_ATTACH_FILTER], optval ptr[in, sock_fprog], optlen len[optval])
 setsockopt$SO_BINDTODEVICE(fd sock, level const[SOL_SOCKET], optname const[SO_BINDTODEVICE], optval ptr[in, devname], optlen len[optval])
 getsockopt$SO_BINDTODEVICE(fd sock, level const[SOL_SOCKET], optname const[SO_BINDTODEVICE], optval ptr[out, devname], optlen len[optval])
@@ -190,9 +226,11 @@ linger {
 
 sockopt_opt_sock_void = SO_DETACH_FILTER, SO_MARK
 sockopt_opt_sock_int = SO_ACCEPTCONN, SO_BROADCAST, SO_DEBUG, SO_DOMAIN, SO_ERROR, SO_DONTROUTE, SO_KEEPALIVE, SO_PEEK_OFF, SO_PRIORITY, SO_PROTOCOL, SO_RCVBUF, SO_RCVBUFFORCE, SO_RCVLOWAT, SO_SNDLOWAT, SO_REUSEADDR, SO_SNDBUF, SO_SNDBUFFORCE, SO_TIMESTAMP_OLD, SO_TYPE, SO_REUSEPORT, SO_OOBINLINE, SO_NO_CHECK, SO_PASSCRED, SO_TIMESTAMPNS_OLD, SO_LOCK_FILTER, SO_PASSSEC, SO_RXQ_OVFL, SO_WIFI_STATUS, SO_NOFCS, SO_SELECT_ERR_QUEUE, SO_BUSY_POLL, SO_MAX_PACING_RATE, SO_ZEROCOPY
-sockopt_opt_sock_timeval = SO_RCVTIMEO_OLD, SO_SNDTIMEO_OLD
+sockopt_opt_sock_timeval = SO_RCVTIMEO_OLD, SO_RCVTIMEO_NEW, SO_SNDTIMEO_OLD, SO_SNDTIMEO_NEW
+sockopt_opt_sock_timestamp = SO_TIMESTAMP_OLD, SO_TIMESTAMP_NEW, SO_TIMESTAMPNS_OLD, SO_TIMESTAMPNS_NEW
+sockopt_opt_sock_timestamping = SO_TIMESTAMPING_OLD, SO_TIMESTAMPING_NEW
 sockopt_opt_sock_buf = SO_PEERNAME, SO_PEERSEC, SO_GET_FILTER, SO_MEMINFO, SO_PEERGROUPS, SO_TXTIME
-sockopt_so_timestamping = SOF_TIMESTAMPING_TX_HARDWARE, SOF_TIMESTAMPING_TX_SOFTWARE, SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE, SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_RAW_HARDWARE, SOF_TIMESTAMPING_OPT_ID, SOF_TIMESTAMPING_TX_SCHED, SOF_TIMESTAMPING_TX_ACK, SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY
+sockopt_so_timestamping = SOF_TIMESTAMPING_TX_HARDWARE, SOF_TIMESTAMPING_TX_SOFTWARE, SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE, SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_RAW_HARDWARE, SOF_TIMESTAMPING_OPT_ID, SOF_TIMESTAMPING_TX_SCHED, SOF_TIMESTAMPING_TX_ACK, SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY, SOF_TIMESTAMPING_OPT_STATS, SOF_TIMESTAMPING_OPT_PKTINFO, SOF_TIMESTAMPING_OPT_TX_SWHW
 
 # Socket ioctls
 
@@ -249,6 +287,10 @@ ioctl$sock_TIOCOUTQ(fd sock, cmd const[TIOCOUTQ], arg ptr[out, int32])
 ioctl$sock_TIOCINQ(fd sock, cmd const[TIOCINQ], arg ptr[out, int32])
 ioctl$SIOCGSTAMP(fd sock, cmd const[SIOCGSTAMP], arg ptr[out, timeval])
 ioctl$SIOCGSTAMPNS(fd sock, cmd const[SIOCGSTAMPNS], arg ptr[out, timespec])
+
+# Socket sendmsg
+sendmsg$sock(fd sock, msg ptr[in, msghdr_sock], f flags[send_flags])
+sendmmsg$sock(fd sock, mmsg ptr[in, array[mmsghdr_sock]], vlen len[mmsg], f flags[send_flags])
 
 resource ifindex[int32]
 
