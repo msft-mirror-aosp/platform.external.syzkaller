@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	flagV        = flag.Int("v", 0, "verbosity")
+	flagV        = flag.Int("vv", 0, "verbosity")
 	mu           sync.Mutex
 	cacheMem     int
 	cacheMaxMem  int
@@ -99,4 +99,11 @@ func Fatal(err error) {
 
 func Fatalf(msg string, args ...interface{}) {
 	golog.Fatalf(msg, args...)
+}
+
+type VerboseWriter int
+
+func (w VerboseWriter) Write(data []byte) (int, error) {
+	Logf(int(w), "%s", data)
+	return len(data), nil
 }

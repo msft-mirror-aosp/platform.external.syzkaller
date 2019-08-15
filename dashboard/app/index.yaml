@@ -22,6 +22,26 @@ indexes:
   - name: Seq
     direction: desc
 
+- kind: Bug
+  properties:
+  - name: Namespace
+  - name: NeedCommitInfo
+  - name: Commits
+
+- kind: Bug
+  properties:
+  - name: BisectCause
+  - name: ReproLevel
+  - name: FirstTime
+    direction: desc
+
+- kind: Bug
+  properties:
+  - name: BisectFix
+  - name: ReproLevel
+  - name: Status
+  - name: LastTime
+
 - kind: Build
   properties:
   - name: Namespace
@@ -90,3 +110,10 @@ indexes:
   properties:
   - name: Reported
   - name: Finished
+
+- kind: Job
+  ancestor: yes
+  properties:
+  - name: Type
+  - name: Finished
+    direction: desc

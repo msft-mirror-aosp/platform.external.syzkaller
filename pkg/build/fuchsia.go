@@ -21,27 +21,41 @@ func (fu fuchsia) build(targetArch, vmType, kernelDir, outputDir, compiler, user
 		return fmt.Errorf("unsupported fuchsia arch %v", targetArch)
 	}
 	arch := sysTarget.KernelHeaderArch
-	if _, err := osutil.RunCmd(time.Hour, kernelDir, "scripts/fx", "clean-build", arch,
-		"--packages", "garnet/packages/products/sshd", "--variant", "asan"); err != nil {
+	product := fmt.Sprintf("%s.%s", "core", arch)
+	if _, err := osutil.RunCmd(time.Hour, kernelDir, "scripts/fx", "--dir", "out/"+arch,
+		"set", product, "--with-base", "//bundles:tools"); err != nil {
 		return err
 	}
+	if _, err := osutil.RunCmd(time.Hour, kernelDir, "scripts/fx", "clean-build"); err != nil {
+		return err
+	}
+
+	// Fuchsia images no longer include ssh keys. Manually append the ssh public key to the zbi.
+	sshZBI := filepath.Join(kernelDir, "out", arch, "fuchsia-ssh.zbi")
+	kernelZBI := filepath.Join(kernelDir, "out", arch, "fuchsia.zbi")
+	authorizedKeys := fmt.Sprintf("data/ssh/authorized_keys=%s", filepath.Join(kernelDir, ".ssh", "authorized_keys"))
+	if _, err := osutil.RunCmd(time.Minute, kernelDir, "out/"+arch+".zircon/tools/zbi",
+		"-o", sshZBI, kernelZBI, "--entry", authorizedKeys); err != nil {
+		return err
+	}
+
 	for src, dst := range map[string]string{
-		"out/" + arch + "/images/fvm.blk":                   "image",
-		"out/" + arch + "/ssh-keys/id_ed25519":              "key",
-		"out/build-zircon/build-" + arch + "/zircon.elf":    "obj/zircon.elf",
-		"out/build-zircon/build-" + arch + "/multiboot.bin": "kernel",
-		"out/" + arch + "/fuchsia.zbi":                      "initrd",
+		"out/" + arch + "/obj/build/images/fvm.blk": "image",
+		".ssh/pkey": "key",
+		"out/" + arch + ".zircon/kernel-" + arch + "-clang/obj/kernel/zircon.elf": "obj/zircon.elf",
+		"out/" + arch + ".zircon/multiboot.bin":                                   "kernel",
+		"out/" + arch + "/fuchsia-ssh.zbi":                                        "initrd",
 	} {
 		fullSrc := filepath.Join(kernelDir, filepath.FromSlash(src))
 		fullDst := filepath.Join(outputDir, filepath.FromSlash(dst))
 		if err := osutil.CopyFile(fullSrc, fullDst); err != nil {
-			return fmt.Errorf("faied to copy %v: %v", src, err)
+			return fmt.Errorf("failed to copy %v: %v", src, err)
 		}
 	}
 	return nil
 }
 
-func (fu fuchsia) clean(kernelDir string) error {
+func (fu fuchsia) clean(kernelDir, targetArch string) error {
 	// We always do clean build because incremental build is frequently broken.
 	// So no need to clean separately.
 	return nil

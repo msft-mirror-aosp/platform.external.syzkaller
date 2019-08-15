@@ -18,6 +18,10 @@ func RemoveAll(dir string) error {
 	return os.RemoveAll(dir)
 }
 
+func SystemMemorySize() uint64 {
+	return 0
+}
+
 func CreateMemMappedFile(size int) (f *os.File, mem []byte, err error) {
 	return nil, nil, fmt.Errorf("CreateMemMappedFile is not implemented")
 }
@@ -43,4 +47,7 @@ func SandboxChown(file string) error {
 }
 
 func setPdeathsig(cmd *exec.Cmd) {
+}
+
+func killPgroup(cmd *exec.Cmd) {
 }

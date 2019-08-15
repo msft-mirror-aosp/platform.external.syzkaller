@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/log"
+	"github.com/google/syzkaller/pkg/osutil"
 )
 
 // Pool represents a set of test machines (VMs, physical devices, etc) of particular type.
@@ -33,8 +34,8 @@ type Instance interface {
 	// Copy copies a hostSrc file into VM and returns file name in VM.
 	Copy(hostSrc string) (string, error)
 
-	// Forward setups forwarding from within VM to host port port
-	// and returns address to use in VM.
+	// Forward sets up forwarding from within VM to the given tcp
+	// port on the host and returns the address to use in VM.
 	Forward(port int) (string, error)
 
 	// Run runs cmd inside of the VM (think of ssh cmd).
@@ -43,10 +44,13 @@ type Instance interface {
 	// Command is terminated after timeout. Send on the stop chan can be used to terminate it earlier.
 	Run(timeout time.Duration, stop <-chan bool, command string) (outc <-chan []byte, errc <-chan error, err error)
 
-	// Diagnose forces VM to dump additional debugging info
-	// (e.g. sending some sys-rq's or SIGABORT'ing a Go program).
-	// Returns true if it did anything.
-	Diagnose() bool
+	// Diagnose retrieves additional debugging info from the VM (e.g. by
+	// sending some sys-rq's or SIGABORT'ing a Go program).
+	//
+	// Optionally returns (some or all) of the info directly. If wait ==
+	// true, the caller must wait for the VM to output info directly to its
+	// log.
+	Diagnose() (diagnosis []byte, wait bool)
 
 	// Close stops and destroys the VM.
 	Close()
@@ -73,6 +77,15 @@ type BootError struct {
 	Output []byte
 }
 
+func MakeBootError(err error, output []byte) error {
+	switch err1 := err.(type) {
+	case *osutil.VerboseError:
+		return BootError{err1.Title, append(err1.Output, output...)}
+	default:
+		return BootError{err.Error(), output}
+	}
+}
+
 func (err BootError) Error() string {
 	return fmt.Sprintf("%v\n%s", err.Title, err.Output)
 }
@@ -81,29 +94,28 @@ func (err BootError) BootError() (string, []byte) {
 	return err.Title, err.Output
 }
 
-// Create creates a VM type that can be used to create individual VMs.
-func Create(typ string, env *Env) (Pool, error) {
-	ctor := ctors[typ]
-	if ctor == nil {
-		return nil, fmt.Errorf("unknown instance type '%v'", typ)
+// Register registers a new VM type within the package.
+func Register(typ string, ctor ctorFunc, allowsOvercommit bool) {
+	Types[typ] = Type{
+		Ctor:       ctor,
+		Overcommit: allowsOvercommit,
 	}
-	return ctor(env)
 }
 
-// Register registers a new VM type within the package.
-func Register(typ string, ctor ctorFunc) {
-	ctors[typ] = ctor
+type Type struct {
+	Ctor       ctorFunc
+	Overcommit bool
 }
+
+type ctorFunc func(env *Env) (Pool, error)
 
 var (
 	// Close to interrupt all pending operations in all VMs.
 	Shutdown   = make(chan struct{})
 	ErrTimeout = errors.New("timeout")
 
-	ctors = make(map[string]ctorFunc)
+	Types = make(map[string]Type)
 )
-
-type ctorFunc func(env *Env) (Pool, error)
 
 func Multiplex(cmd *exec.Cmd, merger *OutputMerger, console io.Closer, timeout time.Duration,
 	stop, closed <-chan bool, debug bool) (<-chan []byte, <-chan error, error) {

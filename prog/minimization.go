@@ -95,8 +95,20 @@ func (ctx *minimizeArgsCtx) do(arg Arg, path string) bool {
 	if ctx.triedPaths[path] {
 		return false
 	}
+	p0 := *ctx.p0
 	if arg.Type().minimize(ctx, arg, path) {
 		return true
+	}
+	if *ctx.p0 == ctx.p {
+		// If minimize committed a new program, it must return true.
+		// Otherwise *ctx.p0 and ctx.p will point to the same program
+		// and any temp mutations to ctx.p will unintentionally affect ctx.p0.
+		panic("shared program committed")
+	}
+	if *ctx.p0 != p0 {
+		// New program was committed, but we did not start iteration anew.
+		// This means we are iterating over a stale tree and any changes won't be visible.
+		panic("iterating over stale program")
 	}
 	ctx.triedPaths[path] = true
 	return false
@@ -121,10 +133,19 @@ func (typ *UnionType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool 
 }
 
 func (typ *PtrType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool {
-	// TODO: try to remove optional ptrs
 	a := arg.(*PointerArg)
 	if a.Res == nil {
 		return false
+	}
+	if !ctx.triedPaths[path+"->"] {
+		removeArg(a.Res)
+		replaceArg(a, MakeSpecialPointerArg(a.Type(), 0))
+		ctx.target.assignSizesCall(ctx.call)
+		if ctx.pred(ctx.p, ctx.callIndex0) {
+			*ctx.p0 = ctx.p
+		}
+		ctx.triedPaths[path+"->"] = true
+		return true
 	}
 	return ctx.do(a.Res, path)
 }
@@ -164,6 +185,14 @@ func (typ *FlagsType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool 
 }
 
 func (typ *ProcType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool {
+	if !typ.Optional() {
+		// Default value for ProcType is 0 (same for all PID's).
+		// Usually 0 either does not make sense at all or make different PIDs collide
+		// (since we use ProcType to separate value ranges for different PIDs).
+		// So don't change ProcType to 0 unless the type is explicitly marked as opt
+		// (in that case we will also generate 0 anyway).
+		return false
+	}
 	return minimizeInt(ctx, arg, path)
 }
 
@@ -174,7 +203,7 @@ func minimizeInt(ctx *minimizeArgsCtx, arg Arg, path string) bool {
 		return false
 	}
 	a := arg.(*ConstArg)
-	def := arg.Type().makeDefaultArg().(*ConstArg)
+	def := arg.Type().DefaultArg().(*ConstArg)
 	if a.Val == def.Val {
 		return false
 	}
@@ -182,9 +211,10 @@ func minimizeInt(ctx *minimizeArgsCtx, arg Arg, path string) bool {
 	a.Val = def.Val
 	if ctx.pred(ctx.p, ctx.callIndex0) {
 		*ctx.p0 = ctx.p
-	} else {
-		a.Val = v0
+		ctx.triedPaths[path] = true
+		return true
 	}
+	a.Val = v0
 	return false
 }
 
@@ -205,7 +235,8 @@ func (typ *ResourceType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bo
 		a.Res, a.Val = r0, 0
 		a.Res.uses[a] = true
 	}
-	return false
+	ctx.triedPaths[path] = true
+	return true
 }
 
 func (typ *BufferType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool {
@@ -214,6 +245,7 @@ func (typ *BufferType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool
 		return false
 	}
 	a := arg.(*DataArg)
+	len0 := len(a.Data())
 	minLen := int(typ.RangeBegin)
 	for step := len(a.Data()) - minLen; len(a.Data()) > minLen && step > 0; {
 		if len(a.Data())-step >= minLen {
@@ -230,6 +262,10 @@ func (typ *BufferType) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool
 			break
 		}
 	}
-	*ctx.p0 = ctx.p
+	if len(a.Data()) != len0 {
+		*ctx.p0 = ctx.p
+		ctx.triedPaths[path] = true
+		return true
+	}
 	return false
 }

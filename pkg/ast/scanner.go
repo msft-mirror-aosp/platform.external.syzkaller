@@ -196,6 +196,7 @@ func (s *scanner) scanStr(pos Pos) string {
 	}
 	lit := string(s.data[pos.Off+1 : s.off])
 	for i := 0; i < len(lit); i++ {
+		//lit[i]
 		if lit[i] < 0x20 || lit[i] >= 0x80 {
 			pos1 := pos
 			pos1.Col += i + 1
@@ -278,7 +279,6 @@ func (s *scanner) next() {
 		// Makes lots of things simpler as we always
 		// want to treat EOF as NEWLINE as well.
 		s.ch = '\n'
-		s.off++
 		return
 	}
 	if s.off > len(s.data) {

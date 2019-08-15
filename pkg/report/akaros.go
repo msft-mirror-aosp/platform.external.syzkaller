@@ -16,14 +16,16 @@ import (
 )
 
 type akaros struct {
-	ignores []*regexp.Regexp
+	*config
 	objfile string
 }
 
-func ctorAkaros(kernelSrc, kernelObj string, ignores []*regexp.Regexp) (Reporter, []string, error) {
+func ctorAkaros(cfg *config) (Reporter, []string, error) {
 	ctx := &akaros{
-		ignores: ignores,
-		objfile: filepath.Join(kernelObj, "akaros-kernel-64b"),
+		config: cfg,
+	}
+	if ctx.kernelObj != "" {
+		ctx.objfile = filepath.Join(ctx.kernelObj, ctx.target.KernelObject)
 	}
 	return ctx, nil, nil
 }
@@ -37,11 +39,16 @@ func (ctx *akaros) Parse(output []byte) *Report {
 	if rep == nil {
 		return nil
 	}
-	rep.Report = ctx.minimizeReport(rep.Report)
+	if report := ctx.minimizeReport(rep.Report); len(report) != 0 {
+		rep.Report = report
+	}
 	return rep
 }
 
 func (ctx *akaros) Symbolize(rep *Report) error {
+	if ctx.objfile == "" {
+		return nil
+	}
 	symb := symbolizer.NewSymbolizer()
 	defer symb.Close()
 	var symbolized []byte

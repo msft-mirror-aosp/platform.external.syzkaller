@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/syzkaller/pkg/compiler"
 )
@@ -35,5 +36,10 @@ func (*akaros) processFile(arch *Arch, info *compiler.ConstInfo) (map[string]uin
 	for _, incdir := range info.Incdirs {
 		args = append(args, "-I"+filepath.Join(dir, incdir))
 	}
-	return extract(info, "gcc", args, "", true)
+	if arch.includeDirs != "" {
+		for _, dir := range strings.Split(arch.includeDirs, ",") {
+			args = append(args, "-I"+dir)
+		}
+	}
+	return extract(info, "gcc", args, "", true, false)
 }

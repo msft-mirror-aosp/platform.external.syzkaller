@@ -43,13 +43,12 @@ type Prog struct {
 	fileConsts map[string]*ConstInfo
 }
 
-// Compile compiles sys description.
-func Compile(desc *ast.Description, consts map[string]uint64, target *targets.Target, eh ast.ErrorHandler) *Prog {
+func createCompiler(desc *ast.Description, target *targets.Target, eh ast.ErrorHandler) *compiler {
 	if eh == nil {
 		eh = ast.LoggingHandler
 	}
 	comp := &compiler{
-		desc:         desc.Clone(),
+		desc:         desc,
 		target:       target,
 		eh:           eh,
 		ptrSize:      target.PtrSize,
@@ -72,6 +71,12 @@ func Compile(desc *ast.Description, consts map[string]uint64, target *targets.Ta
 	for name, n := range builtinStrFlags {
 		comp.strFlags[name] = n
 	}
+	return comp
+}
+
+// Compile compiles sys description.
+func Compile(desc *ast.Description, consts map[string]uint64, target *targets.Target, eh ast.ErrorHandler) *Prog {
+	comp := createCompiler(desc.Clone(), target, eh)
 	comp.typecheck()
 	// The subsequent, more complex, checks expect basic validity of the tree,
 	// in particular corrent number of type arguments. If there were errors,
@@ -237,7 +242,7 @@ func (comp *compiler) parseSizeAttr(attr *ast.Type) uint64 {
 		comp.error(sz.Pos, "unexpected %v, expect int", unexpected)
 		return sizeUnassigned
 	}
-	if sz.HasColon || len(sz.Args) != 0 {
+	if len(sz.Colon) != 0 || len(sz.Args) != 0 {
 		comp.error(sz.Pos, "size attribute has colon or args")
 		return sizeUnassigned
 	}
@@ -278,6 +283,16 @@ func (comp *compiler) getArgsBase(t *ast.Type, field string, dir prog.Dir, isArg
 		}
 	}
 	return desc, args, base
+}
+
+func (comp *compiler) derefPointers(t *ast.Type) (*ast.Type, *typeDesc) {
+	for {
+		desc := comp.getTypeDesc(t)
+		if desc != typePtr {
+			return t, desc
+		}
+		t = t.Args[1]
+	}
 }
 
 func (comp *compiler) foreachType(n0 ast.Node,
