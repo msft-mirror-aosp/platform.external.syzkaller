@@ -134,25 +134,26 @@ type uiBugGroup struct {
 }
 
 type uiBug struct {
-	Namespace      string
-	Title          string
-	NumCrashes     int64
-	NumCrashesBad  bool
-	BisectCause    bool
-	FirstTime      time.Time
-	LastTime       time.Time
-	ReportedTime   time.Time
-	ClosedTime     time.Time
-	ReproLevel     dashapi.ReproLevel
-	ReportingIndex int
-	Status         string
-	Link           string
-	ExternalLink   string
-	CreditEmail    string
-	Commits        []*uiCommit
-	PatchedOn      []string
-	MissingOn      []string
-	NumManagers    int
+	Namespace       string
+	Title           string
+	NumCrashes      int64
+	NumCrashesBad   bool
+	BisectCauseDone bool
+	BisectFixDone   bool
+	FirstTime       time.Time
+	LastTime        time.Time
+	ReportedTime    time.Time
+	ClosedTime      time.Time
+	ReproLevel      dashapi.ReproLevel
+	ReportingIndex  int
+	Status          string
+	Link            string
+	ExternalLink    string
+	CreditEmail     string
+	Commits         []*uiCommit
+	PatchedOn       []string
+	MissingOn       []string
+	NumManagers     int
 }
 
 type uiCrash struct {
@@ -210,15 +211,20 @@ func handleMain(c context.Context, w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return err
 	}
-	groups, fixedCount, err := fetchNamespaceBugs(c, accessLevel, hdr.Namespace)
+	manager := r.FormValue("manager")
+	groups, fixedCount, err := fetchNamespaceBugs(c, accessLevel, hdr.Namespace, manager)
 	if err != nil {
 		return err
+	}
+	fixedLink := fmt.Sprintf("/%v/fixed", hdr.Namespace)
+	if manager != "" {
+		fixedLink = fmt.Sprintf("%v?manager=%v", fixedLink, manager)
 	}
 	data := &uiMainPage{
 		Header:     hdr,
 		Now:        timeNow(c),
 		FixedCount: fixedCount,
-		FixedLink:  fmt.Sprintf("/%v/fixed", hdr.Namespace),
+		FixedLink:  fixedLink,
 		Groups:     groups,
 		Managers:   managers,
 	}
@@ -257,7 +263,8 @@ func handleTerminalBugList(c context.Context, w http.ResponseWriter, r *http.Req
 		return err
 	}
 	hdr.Subpage = typ.Subpage
-	bugs, err := fetchTerminalBugs(c, accessLevel, hdr.Namespace, typ)
+	manager := r.FormValue("manager")
+	bugs, err := fetchTerminalBugs(c, accessLevel, hdr.Namespace, manager, typ)
 	if err != nil {
 		return err
 	}
@@ -489,12 +496,15 @@ func textFilename(tag string) string {
 	}
 }
 
-func fetchNamespaceBugs(c context.Context, accessLevel AccessLevel, ns string) ([]*uiBugGroup, int, error) {
+func fetchNamespaceBugs(c context.Context, accessLevel AccessLevel,
+	ns, manager string) ([]*uiBugGroup, int, error) {
 	var bugs []*Bug
-	_, err := db.NewQuery("Bug").
-		Filter("Namespace=", ns).
-		GetAll(c, &bugs)
-	if err != nil {
+	query := db.NewQuery("Bug").
+		Filter("Namespace=", ns)
+	if manager != "" {
+		query = query.Filter("HappenedOn=", manager)
+	}
+	if _, err := query.GetAll(c, &bugs); err != nil {
 		return nil, 0, err
 	}
 	state, err := loadReportingState(c)
@@ -580,13 +590,16 @@ func fetchNamespaceBugs(c context.Context, accessLevel AccessLevel, ns string) (
 	return uiGroups, fixedCount, nil
 }
 
-func fetchTerminalBugs(c context.Context, accessLevel AccessLevel, ns string, typ *TerminalBug) (*uiBugGroup, error) {
+func fetchTerminalBugs(c context.Context, accessLevel AccessLevel,
+	ns, manager string, typ *TerminalBug) (*uiBugGroup, error) {
 	var bugs []*Bug
-	_, err := db.NewQuery("Bug").
+	query := db.NewQuery("Bug").
 		Filter("Namespace=", ns).
-		Filter("Status=", typ.Status).
-		GetAll(c, &bugs)
-	if err != nil {
+		Filter("Status=", typ.Status)
+	if manager != "" {
+		query = query.Filter("HappenedOn=", manager)
+	}
+	if _, err := query.GetAll(c, &bugs); err != nil {
 		return nil, err
 	}
 	state, err := loadReportingState(c)
@@ -734,21 +747,22 @@ func createUIBug(c context.Context, bug *Bug, state *ReportingState, managers []
 	}
 	id := bug.keyHash()
 	uiBug := &uiBug{
-		Namespace:      bug.Namespace,
-		Title:          bug.displayTitle(),
-		BisectCause:    bug.BisectCause > BisectPending,
-		NumCrashes:     bug.NumCrashes,
-		FirstTime:      bug.FirstTime,
-		LastTime:       bug.LastTime,
-		ReportedTime:   reported,
-		ClosedTime:     bug.Closed,
-		ReproLevel:     bug.ReproLevel,
-		ReportingIndex: reportingIdx,
-		Status:         status,
-		Link:           bugLink(id),
-		ExternalLink:   link,
-		CreditEmail:    creditEmail,
-		NumManagers:    len(managers),
+		Namespace:       bug.Namespace,
+		Title:           bug.displayTitle(),
+		BisectCauseDone: bug.BisectCause > BisectPending,
+		BisectFixDone:   bug.BisectFix > BisectPending,
+		NumCrashes:      bug.NumCrashes,
+		FirstTime:       bug.FirstTime,
+		LastTime:        bug.LastTime,
+		ReportedTime:    reported,
+		ClosedTime:      bug.Closed,
+		ReproLevel:      bug.ReproLevel,
+		ReportingIndex:  reportingIdx,
+		Status:          status,
+		Link:            bugLink(id),
+		ExternalLink:    link,
+		CreditEmail:     creditEmail,
+		NumManagers:     len(managers),
 	}
 	updateBugBadness(c, uiBug)
 	if len(bug.Commits) != 0 {
@@ -783,7 +797,8 @@ func createUIBug(c context.Context, bug *Bug, state *ReportingState, managers []
 
 func mergeUIBug(c context.Context, bug *uiBug, dup *Bug) {
 	bug.NumCrashes += dup.NumCrashes
-	bug.BisectCause = bug.BisectCause || dup.BisectCause > BisectPending
+	bug.BisectCauseDone = bug.BisectCauseDone || dup.BisectCause > BisectPending
+	bug.BisectFixDone = bug.BisectFixDone || dup.BisectFix > BisectPending
 	if bug.LastTime.Before(dup.LastTime) {
 		bug.LastTime = dup.LastTime
 	}

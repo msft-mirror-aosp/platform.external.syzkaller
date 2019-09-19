@@ -243,16 +243,20 @@ var List = map[string]map[string]*Target{
 			PtrSize:          8,
 			PageSize:         4 << 10,
 			KernelHeaderArch: "x64",
-			CCompiler:        os.ExpandEnv("${SOURCEDIR}/buildtools/linux-x64/clang/bin/clang++"),
+			CCompiler:        os.ExpandEnv("${SOURCEDIR}/prebuilt/third_party/clang/linux-x64/bin/clang++"),
 			CrossCFlags: []string{
 				"-Wno-deprecated",
 				"--target=x86_64-fuchsia",
+				"-ldriver",
 				"-lfdio",
 				"-lzircon",
-				"-ldriver",
 				"--sysroot", os.ExpandEnv("${SOURCEDIR}/out/x64/sdk/exported/zircon_sysroot/arch/x64/sysroot"),
-				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/fdio/include"),
 				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/ddk/include"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/fdio/include"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/fidl/include"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/out/x64/fidling/gen/zircon/public/fidl/fuchsia-device"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/out/x64/fidling/gen/zircon/public/fidl/fuchsia-hardware-nand"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/out/x64/fidling/gen/zircon/public/fidl/fuchsia-hardware-usb-peripheral"),
 				"-L", os.ExpandEnv("${SOURCEDIR}/out/x64/gen/zircon/public/lib/driver"),
 				"-L", os.ExpandEnv("${SOURCEDIR}/out/x64/gen/zircon/public/lib/fdio"),
 			},
@@ -261,16 +265,20 @@ var List = map[string]map[string]*Target{
 			PtrSize:          8,
 			PageSize:         4 << 10,
 			KernelHeaderArch: "arm64",
-			CCompiler:        os.ExpandEnv("${SOURCEDIR}/buildtools/linux-x64/clang/bin/clang++"),
+			CCompiler:        os.ExpandEnv("${SOURCEDIR}/prebuilt/third_party/clang/linux-x64/bin/clang++"),
 			CrossCFlags: []string{
 				"-Wno-deprecated",
 				"--target=aarch64-fuchsia",
+				"-ldriver",
 				"-lfdio",
 				"-lzircon",
-				"-ldriver",
 				"--sysroot", os.ExpandEnv("${SOURCEDIR}/out/arm64/sdk/exported/zircon_sysroot/arch/arm64/sysroot"),
-				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/fdio/include"),
 				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/ddk/include"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/fdio/include"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/zircon/system/ulib/fidl/include"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/out/arm64/fidling/gen/zircon/public/fidl/fuchsia-device"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/out/arm64/fidling/gen/zircon/public/fidl/fuchsia-hardware-nand"),
+				"-I", os.ExpandEnv("${SOURCEDIR}/out/arm64/fidling/gen/zircon/public/fidl/fuchsia-hardware-usb-peripheral"),
 				"-L", os.ExpandEnv("${SOURCEDIR}/out/arm64/gen/zircon/public/lib/driver"),
 				"-L", os.ExpandEnv("${SOURCEDIR}/out/arm64/gen/zircon/public/lib/fdio"),
 			},
@@ -311,7 +319,6 @@ var oses = map[string]osCommon{
 		ExecutorUsesShmem:      true,
 		ExecutorUsesForkServer: true,
 		KernelObject:           "vmlinux",
-		CPP:                    "cpp",
 	},
 	"freebsd": {
 		SyscallNumbers:         true,
@@ -328,7 +335,6 @@ var oses = map[string]osCommon{
 		ExecutorUsesShmem:      true,
 		ExecutorUsesForkServer: true,
 		KernelObject:           "netbsd.gdb",
-		CPP:                    "cpp",
 	},
 	"openbsd": {
 		SyscallNumbers:         true,
@@ -344,7 +350,6 @@ var oses = map[string]osCommon{
 		ExecutorUsesShmem:      false,
 		ExecutorUsesForkServer: false,
 		KernelObject:           "zircon.elf",
-		CPP:                    "cpp",
 	},
 	"windows": {
 		SyscallNumbers:         false,
@@ -352,7 +357,6 @@ var oses = map[string]osCommon{
 		ExecutorUsesForkServer: false,
 		ExeExtension:           ".exe",
 		KernelObject:           "vmlinux",
-		CPP:                    "cpp",
 	},
 	"akaros": {
 		BuildOS:                "linux",
@@ -361,12 +365,10 @@ var oses = map[string]osCommon{
 		ExecutorUsesShmem:      false,
 		ExecutorUsesForkServer: true,
 		KernelObject:           "akaros-kernel-64b",
-		CPP:                    "cpp",
 	},
 	"trusty": {
 		SyscallNumbers: true,
 		SyscallPrefix:  "__NR_",
-		CPP:            "cpp",
 	},
 }
 
@@ -397,8 +399,12 @@ func init() {
 		goos = "linux"
 	}
 	for _, target := range List["test"] {
-		target.CCompiler = List[goos][runtime.GOARCH].CCompiler
-		target.CPP = List[goos][runtime.GOARCH].CPP
+		if List[goos] != nil {
+			if host := List[goos][runtime.GOARCH]; host != nil {
+				target.CCompiler = host.CCompiler
+				target.CPP = host.CPP
+			}
+		}
 		target.BuildOS = goos
 		if runtime.GOOS == "freebsd" && runtime.GOARCH == "amd64" && target.PtrSize == 4 {
 			// -m32 alone does not work on freebsd with gcc.
@@ -429,6 +435,9 @@ func initTarget(target *Target, OS, arch string) {
 	}
 	if target.CCompiler == "" {
 		target.CCompiler = target.CCompilerPrefix + "gcc"
+	}
+	if target.CPP == "" {
+		target.CPP = "cpp"
 	}
 	if target.BuildOS == "" {
 		target.BuildOS = OS

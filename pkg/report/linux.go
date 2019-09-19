@@ -705,6 +705,7 @@ var linuxStackParams = &stackParams{
 		"mutex_lock",
 		"mutex_trylock",
 		"mutex_unlock",
+		"mutex_remove_waiter",
 		"osq_lock",
 		"osq_unlock",
 		"__wake_up",
@@ -758,6 +759,18 @@ var linuxStackParams = &stackParams{
 		"program_check_exception",
 		"program_check_common",
 		"del_timer_sync",
+		"flush_work",
+		"__cancel_work_timer",
+		"cancel_work_sync",
+		"flush_workqueue",
+		"drain_workqueue",
+		"destroy_workqueue",
+		"get_device_parent",
+		"device_add",
+		"finish_wait",
+		"rollback_registered",
+		"unregister_netdev",
+		"usb_kill_urb",
 	},
 	corruptedLines: []*regexp.Regexp{
 		// Fault injection stacks are frequently intermixed with crash reports.
@@ -1018,11 +1031,12 @@ var linuxOopses = []*oops{
 		[]byte("WARNING:"),
 		[]oopsFormat{
 			{
-				title: compile("WARNING: .*lib/debugobjects\\.c.* debug_print_object"),
+				title: compile("WARNING: .*lib/debugobjects\\.c.* (?:debug_print|debug_check)"),
 				fmt:   "WARNING: ODEBUG bug in %[1]v",
 				// Skip all users of ODEBUG as well.
 				stack: warningStackFmt("debug_", "rcu", "hrtimer_", "timer_",
-					"work_", "percpu_", "kmem_", "slab_", "kfree", "vunmap", "vfree"),
+					"work_", "percpu_", "kmem_", "slab_", "kfree", "vunmap",
+					"vfree", "__free_", "debug_check"),
 			},
 			{
 				title: compile("WARNING: .*mm/usercopy\\.c.* usercopy_warn"),
@@ -1042,7 +1056,7 @@ var linuxOopses = []*oops{
 			{
 				title: compile("WARNING: .*lib/refcount\\.c.* refcount_"),
 				fmt:   "WARNING: refcount bug in %[1]v",
-				stack: warningStackFmt("refcount"),
+				stack: warningStackFmt("refcount", "kobject_"),
 			},
 			{
 				title: compile("WARNING: .*kernel/locking/lockdep\\.c.*lock_"),
