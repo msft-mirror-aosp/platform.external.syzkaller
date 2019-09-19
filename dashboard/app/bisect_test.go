@@ -363,8 +363,55 @@ https://goo.gl/tpsmEJ#testing-patches`,
 	done.Build.ID = jobID
 	c.expectOK(c.client2.JobDone(done))
 
-	// TODO: Reporting for BisectFix results not implemented
-	// c.pollEmailBug()
+	_, extBugID, err = email.RemoveAddrContext(msg4.Sender)
+	c.expectOK(err)
+	_, dbCrash, _ = c.loadBug(extBugID)
+	reproSyzLink = externalLink(c.ctx, textReproSyz, dbCrash.ReproSyz)
+	reproCLink = externalLink(c.ctx, textReproC, dbCrash.ReproC)
+	dbJob, dbBuild, dbJobCrash = c.loadJob(jobID)
+	kernelConfigLink = externalLink(c.ctx, textKernelConfig, dbBuild.KernelConfig)
+	bisectCrashReportLink = externalLink(c.ctx, textCrashReport, dbJob.CrashReport)
+	bisectCrashLogLink = externalLink(c.ctx, textCrashLog, dbJob.CrashLog)
+	bisectLogLink = externalLink(c.ctx, textLog, dbJob.Log)
+	crashLogLink = externalLink(c.ctx, textCrashLog, dbJobCrash.Log)
+
+	{
+		msg := c.pollEmailBug()
+		// Not mailed to commit author/cc because !MailMaintainers.
+		// c.expectEQ(msg.To, []string{"test@syzkaller.com"})
+		c.expectEQ(msg.Subject, crash4.Title)
+		c.expectEQ(len(msg.Attachments), 0)
+		c.expectEQ(msg.Body, fmt.Sprintf(`syzbot suspects this bug was fixed by commit:
+
+commit 46e65cb4a0448942ec316b24d60446bbd5cc7827
+Author: Author Kernelov <author@kernel.org>
+Date:   Wed Feb 9 04:05:06 2000 +0000
+
+    kernel: add a fix
+
+bisection log:  %[2]v
+start commit:   11111111 kernel_commit_title1
+git tree:       repo1 branch1
+final crash:    %[3]v
+console output: %[4]v
+kernel config:  %[5]v
+dashboard link: https://testapp.appspot.com/bug?extid=%[1]v
+syz repro:      %[6]v
+
+If the result looks correct, please mark the bug fixed by replying with:
+
+#syz fix: kernel: add a fix
+
+For information about bisection process see: https://goo.gl/tpsmEJ#bisection
+`, extBugID, bisectLogLink, bisectCrashReportLink, bisectCrashLogLink, kernelConfigLink, reproSyzLink, reproCLink))
+
+		syzRepro := []byte(fmt.Sprintf("%s#%s\n%s", syzReproPrefix, crash4.ReproOpts, crash4.ReproSyz))
+		c.checkURLContents(bisectLogLink, []byte("bisectfix log 4"))
+		c.checkURLContents(bisectCrashReportLink, []byte("bisectfix crash report 4"))
+		c.checkURLContents(bisectCrashLogLink, []byte("bisectfix crash log 4"))
+		c.checkURLContents(kernelConfigLink, []byte("config1"))
+		c.checkURLContents(reproSyzLink, syzRepro)
+	}
 
 	// No more bisection jobs.
 	pollResp = c.client2.pollJobs(build.Manager)
@@ -803,6 +850,8 @@ func TestBugBisectionResults(t *testing.T) {
 		},
 	}
 	c.expectOK(c.client2.JobDone(done))
+	msg := c.client2.pollEmailBug()
+	c.expectTrue(strings.Contains(msg.Body, "syzbot suspects this bug was fixed by commit:"))
 
 	// Fetch bug details
 	var bugs []*Bug
@@ -818,4 +867,106 @@ func TestBugBisectionResults(t *testing.T) {
 	c.expectTrue(bytes.Contains(content, []byte("kernel: add a bug")))
 	c.expectTrue(bytes.Contains(content, []byte("Bisection: fixed by")))
 	c.expectTrue(bytes.Contains(content, []byte("kernel: add a fix")))
+}
+
+// Test that bisection status shows up on main page
+func TestBugBisectionStatus(t *testing.T) {
+	c := NewCtx(t)
+	defer c.Close()
+
+	// Upload a crash report
+	build := testBuild(1)
+	c.client2.UploadBuild(build)
+	crash := testCrashWithRepro(build, 1)
+	c.client2.ReportCrash(crash)
+	c.client2.pollEmailBug()
+
+	// Receive the JobBisectCause and send cause information
+	resp := c.client2.pollJobs(build.Manager)
+	c.client2.expectNE(resp.ID, "")
+	c.client2.expectEQ(resp.Type, dashapi.JobBisectCause)
+	jobID := resp.ID
+	done := &dashapi.JobDoneReq{
+		ID:          jobID,
+		Build:       *build,
+		Log:         []byte("bisectfix log 4"),
+		CrashTitle:  "bisectfix crash title 4",
+		CrashLog:    []byte("bisectfix crash log 4"),
+		CrashReport: []byte("bisectfix crash report 4"),
+		Commits: []dashapi.Commit{
+			{
+				Hash:       "36e65cb4a0448942ec316b24d60446bbd5cc7827",
+				Title:      "kernel: add a bug",
+				Author:     "author@kernel.org",
+				AuthorName: "Author Kernelov",
+				CC: []string{
+					"reviewer1@kernel.org", "\"Reviewer2\" <reviewer2@kernel.org>",
+					// These must be filtered out:
+					"syzbot@testapp.appspotmail.com",
+					"syzbot+1234@testapp.appspotmail.com",
+					"\"syzbot\" <syzbot+1234@testapp.appspotmail.com>",
+				},
+				Date: time.Date(2000, 2, 9, 4, 5, 6, 7, time.UTC),
+			},
+		},
+	}
+	c.expectOK(c.client2.JobDone(done))
+
+	// Fetch bug, namespace details
+	var bugs []*Bug
+	_, err := db.NewQuery("Bug").GetAll(c.ctx, &bugs)
+	c.expectEQ(err, nil)
+	c.expectEQ(len(bugs), 1)
+	url := fmt.Sprintf("/%v", bugs[0].Namespace)
+	content, err := c.httpRequest("GET", url, "", AccessAdmin)
+	c.expectEQ(err, nil)
+	c.expectTrue(bytes.Contains(content, []byte("cause")))
+
+	// Advance time by 30 days and read out any notification emails
+	{
+		c.advanceTime(30 * 24 * time.Hour)
+		msg := c.client2.pollEmailBug()
+		c.expectTrue(strings.Contains(msg.Body, "syzbot has bisected this bug to:"))
+		msg = c.client2.pollEmailBug()
+		c.expectTrue(strings.Contains(msg.Body, "Sending this report upstream."))
+		msg = c.client2.pollEmailBug()
+		c.expectTrue(strings.Contains(msg.Body, "syzbot found the following crash"))
+	}
+
+	// Receive a JobBisectfix and send fix information.
+	resp = c.client2.pollJobs(build.Manager)
+	c.client2.expectNE(resp.ID, "")
+	c.client2.expectEQ(resp.Type, dashapi.JobBisectFix)
+	jobID = resp.ID
+	done = &dashapi.JobDoneReq{
+		ID:          jobID,
+		Build:       *build,
+		Log:         []byte("bisectfix log 4"),
+		CrashTitle:  "bisectfix crash title 4",
+		CrashLog:    []byte("bisectfix crash log 4"),
+		CrashReport: []byte("bisectfix crash report 4"),
+		Commits: []dashapi.Commit{
+			{
+				Hash:       "46e65cb4a0448942ec316b24d60446bbd5cc7827",
+				Title:      "kernel: add a fix",
+				Author:     "author@kernel.org",
+				AuthorName: "Author Kernelov",
+				CC: []string{
+					"reviewer1@kernel.org", "\"Reviewer2\" <reviewer2@kernel.org>",
+					// These must be filtered out:
+					"syzbot@testapp.appspotmail.com",
+					"syzbot+1234@testapp.appspotmail.com",
+					"\"syzbot\" <syzbot+1234@testapp.appspotmail.com>",
+				},
+				Date: time.Date(2000, 2, 9, 4, 5, 6, 7, time.UTC),
+			},
+		},
+	}
+	c.expectOK(c.client2.JobDone(done))
+	content, err = c.httpRequest("GET", url, "", AccessAdmin)
+	c.expectEQ(err, nil)
+	c.expectTrue(bytes.Contains(content, []byte("cause+fix")))
+
+	msg := c.client2.pollEmailBug()
+	c.expectTrue(strings.Contains(msg.Body, "syzbot suspects this bug was fixed by commit:"))
 }
