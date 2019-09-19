@@ -48,6 +48,12 @@ $ make TARGETOS=fuchsia TARGETARCH=amd64 \
 
 ## Running syz-manager
 
+Running syz-manager requires you to have built fuchsia previously, and added the ssh keys to the fuchsia.zbi image:
+
+```
+$ ${SOURCEDIR}/out/x64.zircon/tools/zbi -o ${SOURCEDIR}/out/x64/fuchsia-ssh.zbi ${SOURCEDIR}/out/x64/fuchsia.zbi --entry "data/ssh/authorized_keys=${SOURCEDIR}/.ssh/authorized_keys"
+```
+
 Run `syz-manager` with a config along the lines of:
 ```
 {
@@ -68,7 +74,7 @@ Run `syz-manager` with a config along the lines of:
                 "cpu": 4,
                 "mem": 2048,
                 "kernel": "/fuchsia/out/x64.zircon/multiboot.bin",
-                "initrd": "/fuchsia/out/x64/fuchsia.zbi"
+                "initrd": "/fuchsia/out/x64/fuchsia-ssh.zbi"
         }
 }
 ```
@@ -79,14 +85,14 @@ Syscall descriptions live in the `sys/fuchsia` folder. To update a syscall, you 
 
 To build fuchsia run:
 ```shell
-$ fx --dir "out/x64" set core.x64
+$ fx --dir "out/x64" set core.x64 --with-base "//bundles:tools"
 $ fx clean-build
 ```
 
 And
 
 ```shell
-$ fx --dir "out/arm64" set core.arm64
+$ fx --dir "out/arm64" set core.arm64 --with-base "//bundles:tools"
 $ fx clean-build
 ```
 
