@@ -141,10 +141,11 @@ commit:         11111111 kernel_commit_title1
 git tree:       repo1 branch1
 console output: %[3]v
 kernel config:  %[2]v
+dashboard link: https://testapp.appspot.com/bug?extid=%[4]v
 compiler:       compiler1
 patch:          %[1]v
 
-`, patchLink, kernelConfigLink, logLink))
+`, patchLink, kernelConfigLink, logLink, extBugID))
 		c.checkURLContents(patchLink, []byte(patch))
 		c.checkURLContents(kernelConfigLink, build.KernelConfig)
 		c.checkURLContents(logLink, jobDoneReq.CrashLog)
@@ -178,10 +179,11 @@ Tested on:
 commit:         11111111 kernel_commit_title1
 git tree:       repo1 branch1
 kernel config:  %[2]v
+dashboard link: https://testapp.appspot.com/bug?extid=%[3]v
 compiler:       compiler1
 patch:          %[1]v
 
-`, patchLink, kernelConfigLink))
+`, patchLink, kernelConfigLink, extBugID))
 		c.checkURLContents(patchLink, []byte(patch))
 		c.checkURLContents(kernelConfigLink, build.KernelConfig)
 	}
@@ -219,10 +221,11 @@ Tested on:
 commit:         11111111 kernel_commit_title1
 git tree:       repo1 branch1
 kernel config:  %[4]v
+dashboard link: https://testapp.appspot.com/bug?extid=%[5]v
 compiler:       compiler1
 patch:          %[3]v
 
-`, truncatedError, errorLink, patchLink, kernelConfigLink))
+`, truncatedError, errorLink, patchLink, kernelConfigLink, extBugID))
 		c.checkURLContents(patchLink, []byte(patch))
 		c.checkURLContents(errorLink, jobDoneReq.Error)
 		c.checkURLContents(kernelConfigLink, build.KernelConfig)
@@ -253,6 +256,7 @@ Tested on:
 commit:         11111111 kernel_commit_title1
 git tree:       repo1 branch1
 kernel config:  %[3]v
+dashboard link: https://testapp.appspot.com/bug?extid=%[1]v
 compiler:       compiler1
 patch:          %[2]v
 
@@ -311,6 +315,7 @@ Tested on:
 commit:         5e6a2eea kernel_commit_title2
 git tree:       git://mygit.com/git.git
 kernel config:  %[2]v
+dashboard link: https://testapp.appspot.com/bug?extid=%[1]v
 compiler:       compiler2
 
 Note: testing is done by a robot and is best-effort only.
@@ -397,6 +402,70 @@ func TestBisectFixJob(t *testing.T) {
 	done = &dashapi.JobDoneReq{
 		ID:    resp.ID,
 		Error: []byte("testBisectFixJob:JobBisectFix"),
+	}
+	c.client2.expectOK(c.client2.JobDone(done))
+}
+
+// Test that JobBisectFix jobs are re-tried if crash occurs on ToT
+func TestBisectFixRetry(t *testing.T) {
+	c := NewCtx(t)
+	defer c.Close()
+
+	// Upload a crash report
+	build := testBuild(1)
+	c.client2.UploadBuild(build)
+	crash := testCrashWithRepro(build, 1)
+	c.client2.ReportCrash(crash)
+	c.client2.pollEmailBug()
+
+	// Receive the JobBisectCause
+	resp := c.client2.pollJobs(build.Manager)
+	c.client2.expectNE(resp.ID, "")
+	c.client2.expectEQ(resp.Type, dashapi.JobBisectCause)
+	done := &dashapi.JobDoneReq{
+		ID:    resp.ID,
+		Error: []byte("testBisectFixRetry:JobBisectCause"),
+	}
+	c.client2.expectOK(c.client2.JobDone(done))
+
+	// Advance time by 30 days and read out any notification emails
+	{
+		c.advanceTime(30 * 24 * time.Hour)
+		msg := c.client2.pollEmailBug()
+		c.expectEQ(msg.Subject, "title1")
+		c.expectTrue(strings.Contains(msg.Body, "Sending this report upstream."))
+
+		msg = c.client2.pollEmailBug()
+		c.expectEQ(msg.Subject, "title1")
+		c.expectTrue(strings.Contains(msg.Body, "syzbot found the following crash"))
+	}
+
+	// Ensure that we get a JobBisectFix. We send back a crashlog, no error, no commits
+	resp = c.client2.pollJobs(build.Manager)
+	c.client2.expectNE(resp.ID, "")
+	c.client2.expectEQ(resp.Type, dashapi.JobBisectFix)
+	done = &dashapi.JobDoneReq{
+		Build: dashapi.Build{
+			ID: "build1",
+		},
+		ID:          resp.ID,
+		CrashLog:    []byte("this is a crashlog"),
+		CrashReport: []byte("this is a crashreport"),
+	}
+	c.client2.expectOK(c.client2.JobDone(done))
+
+	// Advance time by 30 days. No notification emails
+	{
+		c.advanceTime(30 * 24 * time.Hour)
+	}
+
+	// Ensure that we get a JobBisectFix retry
+	resp = c.client2.pollJobs(build.Manager)
+	c.client2.expectNE(resp.ID, "")
+	c.client2.expectEQ(resp.Type, dashapi.JobBisectFix)
+	done = &dashapi.JobDoneReq{
+		ID:    resp.ID,
+		Error: []byte("testBisectFixRetry:JobBisectFix"),
 	}
 	c.client2.expectOK(c.client2.JobDone(done))
 }

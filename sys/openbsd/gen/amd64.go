@@ -19,6 +19,7 @@ var resources_amd64 = []*ResourceDesc{
 	{Name: "fd_klog", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_klog"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
 	{Name: "fd_kqueue", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_kqueue"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
 	{Name: "fd_pci", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_pci"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
+	{Name: "fd_speaker", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_speaker"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
 	{Name: "fd_tty", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_tty"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
 	{Name: "fd_vmm", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_vmm"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
 	{Name: "fd_wsdisplay", Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", TypeSize: 4}}}, Kind: []string{"fd", "fd_wsdisplay"}, Values: []uint64{18446744073709551615, 18446744073709551516}},
@@ -471,6 +472,10 @@ var structDescs_amd64 = []*KeyedStruct{
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "sec", TypeSize: 8, ArgDir: 2}}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "usec", TypeSize: 8, ArgDir: 2}}},
 	}}},
+	{Key: StructKey{Name: "tone"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "tone", TypeSize: 8}, Fields: []Type{
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "frequency", TypeSize: 4}}},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "duration", TypeSize: 4}}},
+	}}},
 	{Key: StructKey{Name: "tstamps"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "tstamps", TypeSize: 8}, Fields: []Type{
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "set", TypeSize: 4}}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "clr", TypeSize: 4}}},
@@ -797,6 +802,9 @@ var syscalls_amd64 = []*Syscall{
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "peer", TypeSize: 8, IsOptional: true}, Type: &UnionType{Key: StructKey{Name: "sockaddr_un", Dir: 1}}},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "peerlen", TypeSize: 8}, Type: &LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", TypeSize: 4, ArgDir: 2}}, Path: []string{"peer"}}},
 	}, Ret: &ResourceType{TypeCommon: TypeCommon{TypeName: "sock_unix", FldName: "ret", TypeSize: 4, ArgDir: 1}}},
+	{NR: 51, Name: "acct", CallName: "acct", Args: []Type{
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "path", TypeSize: 8}, Type: &BufferType{TypeCommon: TypeCommon{TypeName: "filename", IsVarlen: true}, Kind: 3}},
+	}},
 	{NR: 104, Name: "bind", CallName: "bind", Args: []Type{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "sock", FldName: "fd", TypeSize: 4}},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "addr", TypeSize: 8}, Type: &UnionType{Key: StructKey{Name: "sockaddr_storage"}}},
@@ -1292,6 +1300,16 @@ var syscalls_amd64 = []*Syscall{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "cmd", TypeSize: 8}}, Val: 3222302723},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "arg", TypeSize: 8}, Type: &StructType{Key: StructKey{Name: "pci_io"}}},
 	}},
+	{NR: 54, Name: "ioctl$SPKRTONE", CallName: "ioctl", Args: []Type{
+		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd_diskmap", FldName: "fd", TypeSize: 4}},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "cmd", TypeSize: 8}}, Val: 2148029185},
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "arg", TypeSize: 8}, Type: &StructType{Key: StructKey{Name: "tone"}}},
+	}},
+	{NR: 54, Name: "ioctl$SPKRTUNE", CallName: "ioctl", Args: []Type{
+		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd_diskmap", FldName: "fd", TypeSize: 4}},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "cmd", TypeSize: 8}}, Val: 536892162},
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "arg", TypeSize: 8}, Type: &StructType{Key: StructKey{Name: "tone"}}},
+	}},
 	{NR: 54, Name: "ioctl$TIOCCBRK", CallName: "ioctl", MissingArgs: 1, Args: []Type{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd_tty", FldName: "fd", TypeSize: 4}},
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "cmd", TypeSize: 8}}, Val: 536900730},
@@ -1693,6 +1711,12 @@ var syscalls_amd64 = []*Syscall{
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "timeout", TypeSize: 8}, Type: &StructType{Key: StructKey{Name: "timespec"}}},
 	}},
 	{NR: 269, Name: "kqueue", CallName: "kqueue", Ret: &ResourceType{TypeCommon: TypeCommon{TypeName: "fd_kqueue", FldName: "ret", TypeSize: 4, ArgDir: 1}}},
+	{NR: 45, Name: "ktrace", CallName: "ktrace", Args: []Type{
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "tracefile", TypeSize: 8}, Type: &BufferType{TypeCommon: TypeCommon{TypeName: "filename", IsVarlen: true}, Kind: 3}},
+		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "ktrace_op_flags", FldName: "ops", TypeSize: 8}}, Vals: []uint64{0, 1, 2, 4}, BitMask: true},
+		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "ktrace_trace_flags", FldName: "trpoints", TypeSize: 8}}, Vals: []uint64{2, 4, 8, 16, 32, 256, 512, 1024, 2048, 4096, 1073741824}, BitMask: true},
+		&ResourceType{TypeCommon: TypeCommon{TypeName: "pid", FldName: "pid", TypeSize: 4}},
+	}},
 	{NR: 254, Name: "lchown", CallName: "lchown", Args: []Type{
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "file", TypeSize: 8}, Type: &BufferType{TypeCommon: TypeCommon{TypeName: "filename", IsVarlen: true}, Kind: 3}},
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "uid", FldName: "uid", TypeSize: 4}},
@@ -1873,6 +1897,12 @@ var syscalls_amd64 = []*Syscall{
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "open_flags", FldName: "flags", TypeSize: 8}}, Vals: []uint64{0, 1, 2, 8, 512, 1024, 2048, 16, 32, 256, 65536, 128, 128, 128, 32768, 131072, 64}},
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "mode", TypeSize: 8}}},
 	}, Ret: &ResourceType{TypeCommon: TypeCommon{TypeName: "fd_pci", FldName: "ret", TypeSize: 4, ArgDir: 1}}},
+	{NR: 321, Name: "openat$speaker", CallName: "openat", Args: []Type{
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "fd", TypeSize: 8}}, Val: 18446744073709551516},
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "file", TypeSize: 8}, Type: &BufferType{TypeCommon: TypeCommon{TypeName: "string", TypeSize: 13}, Kind: 2, Values: []string{"/dev/speaker\x00"}}},
+		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "open_flags", FldName: "flags", TypeSize: 8}}, Vals: []uint64{0, 1, 2, 8, 512, 1024, 2048, 16, 32, 256, 65536, 128, 128, 128, 32768, 131072, 64}},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "mode", TypeSize: 8}}},
+	}, Ret: &ResourceType{TypeCommon: TypeCommon{TypeName: "fd_speaker", FldName: "ret", TypeSize: 4, ArgDir: 1}}},
 	{NR: 321, Name: "openat$tty", CallName: "openat", Args: []Type{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "fd", TypeSize: 8}}, Val: 18446744073709551516},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "file", TypeSize: 8}, Type: &BufferType{TypeCommon: TypeCommon{TypeName: "string", TypeSize: 9}, Kind: 2, Values: []string{"/dev/tty\x00"}}},
@@ -2531,6 +2561,21 @@ var consts_amd64 = []ConstValue{
 	{Name: "KDSETRAD", Value: 536890179},
 	{Name: "KD_GRAPHICS", Value: 1},
 	{Name: "KD_TEXT"},
+	{Name: "KTRFAC_EXECARGS", Value: 1024},
+	{Name: "KTRFAC_EXECENV", Value: 2048},
+	{Name: "KTRFAC_GENIO", Value: 16},
+	{Name: "KTRFAC_INHERIT", Value: 1073741824},
+	{Name: "KTRFAC_NAMEI", Value: 8},
+	{Name: "KTRFAC_PLEDGE", Value: 4096},
+	{Name: "KTRFAC_PSIG", Value: 32},
+	{Name: "KTRFAC_STRUCT", Value: 256},
+	{Name: "KTRFAC_SYSCALL", Value: 2},
+	{Name: "KTRFAC_SYSRET", Value: 4},
+	{Name: "KTRFAC_USER", Value: 512},
+	{Name: "KTRFLAG_DESCEND", Value: 4},
+	{Name: "KTROP_CLEAR", Value: 1},
+	{Name: "KTROP_CLEARFILE", Value: 2},
+	{Name: "KTROP_SET"},
 	{Name: "K_RAW"},
 	{Name: "K_XLATE", Value: 1},
 	{Name: "LED_CAP", Value: 1},
@@ -2686,7 +2731,10 @@ var consts_amd64 = []ConstValue{
 	{Name: "SO_SNDTIMEO", Value: 4101},
 	{Name: "SO_TIMESTAMP", Value: 2048},
 	{Name: "SO_TYPE", Value: 4104},
+	{Name: "SPKRTONE", Value: 2148029185},
+	{Name: "SPKRTUNE", Value: 536892162},
 	{Name: "SYS_accept", Value: 30},
+	{Name: "SYS_acct", Value: 51},
 	{Name: "SYS_bind", Value: 104},
 	{Name: "SYS_chdir", Value: 12},
 	{Name: "SYS_chflags", Value: 34},
@@ -2732,6 +2780,7 @@ var consts_amd64 = []ConstValue{
 	{Name: "SYS_ioctl", Value: 54},
 	{Name: "SYS_kevent", Value: 72},
 	{Name: "SYS_kqueue", Value: 269},
+	{Name: "SYS_ktrace", Value: 45},
 	{Name: "SYS_lchown", Value: 254},
 	{Name: "SYS_link", Value: 9},
 	{Name: "SYS_linkat", Value: 317},
@@ -3001,4 +3050,4 @@ var consts_amd64 = []ConstValue{
 	{Name: "__MAP_NOREPLACE", Value: 2048},
 }
 
-const revision_amd64 = "33de16487cc0a0d25eaa32ea4166bbbc75d2994e"
+const revision_amd64 = "eee7ba72a578dfec4292538dd7a1fbe4e927d64f"

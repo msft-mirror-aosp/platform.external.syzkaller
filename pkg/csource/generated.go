@@ -35,7 +35,7 @@ NORETURN void doexit(int status)
 
 #if SYZ_EXECUTOR || SYZ_PROCS || SYZ_REPEAT && SYZ_ENABLE_CGROUPS ||         \
     SYZ_ENABLE_NETDEV || __NR_syz_mount_image || __NR_syz_read_part_table || \
-    __NR_syz_usb_connect || (GOOS_openbsd || GOOS_freebsd) && SYZ_TUN_ENABLE
+    __NR_syz_usb_connect || (GOOS_freebsd || GOOS_openbsd || GOOS_netbsd) && SYZ_TUN_ENABLE
 unsigned long long procid;
 #endif
 
@@ -152,6 +152,8 @@ static void use_temporary_dir(void)
 {
 #if SYZ_SANDBOX_ANDROID_UNTRUSTED_APP
 	char tmpdir_template[] = "/data/data/syzkaller/syzkaller.XXXXXX";
+#elif GOOS_fuchsia
+	char tmpdir_template[] = "/tmp/syzkaller.XXXXXX";
 #else
 	char tmpdir_template[] = "./syzkaller.XXXXXX";
 #endif
@@ -440,7 +442,13 @@ static uintptr_t syz_open_pts(void)
 
 static int tunfd = -1;
 #define SYZ_TUN_MAX_PACKET_SIZE 1000
+
+#if GOOS_netbsd
+#define MAX_TUN 64
+
+#else
 #define MAX_TUN 4
+#endif
 #define TUN_IFACE "tap%d"
 #define TUN_DEVICE "/dev/tap%d"
 
@@ -1747,28 +1755,33 @@ static long syz_extract_tcp_res(volatile long a0, volatile long a1, volatile lon
 
 #define USB_DEBUG 0
 
+#define USB_MAX_IFACE_NUM 4
 #define USB_MAX_EP_NUM 32
 
-struct usb_device_index {
-	struct usb_device_descriptor* dev;
-	struct usb_config_descriptor* config;
-	unsigned config_length;
+struct usb_iface_index {
 	struct usb_interface_descriptor* iface;
 	struct usb_endpoint_descriptor* eps[USB_MAX_EP_NUM];
 	unsigned eps_num;
 };
 
+struct usb_device_index {
+	struct usb_device_descriptor* dev;
+	struct usb_config_descriptor* config;
+	unsigned config_length;
+	struct usb_iface_index ifaces[USB_MAX_IFACE_NUM];
+	unsigned ifaces_num;
+};
+
 static bool parse_usb_descriptor(char* buffer, size_t length, struct usb_device_index* index)
 {
-	if (length < sizeof(*index->dev) + sizeof(*index->config) + sizeof(*index->iface))
+	if (length < sizeof(*index->dev) + sizeof(*index->config))
 		return false;
+
+	memset(index, 0, sizeof(*index));
 
 	index->dev = (struct usb_device_descriptor*)buffer;
 	index->config = (struct usb_config_descriptor*)(buffer + sizeof(*index->dev));
 	index->config_length = length - sizeof(*index->dev);
-	index->iface = (struct usb_interface_descriptor*)(buffer + sizeof(*index->dev) + sizeof(*index->config));
-
-	index->eps_num = 0;
 	size_t offset = 0;
 
 	while (true) {
@@ -1780,12 +1793,18 @@ static bool parse_usb_descriptor(char* buffer, size_t length, struct usb_device_
 			break;
 		if (offset + desc_length > length)
 			break;
-		if (desc_type == USB_DT_ENDPOINT) {
-			index->eps[index->eps_num] = (struct usb_endpoint_descriptor*)(buffer + offset);
-			index->eps_num++;
+		if (desc_type == USB_DT_INTERFACE && index->ifaces_num < USB_MAX_IFACE_NUM) {
+			struct usb_interface_descriptor* iface = (struct usb_interface_descriptor*)(buffer + offset);
+			debug("parse_usb_descriptor: found interface #%u (%d, %d) at %p\n",
+			      index->ifaces_num, iface->bInterfaceNumber, iface->bAlternateSetting, iface);
+			index->ifaces[index->ifaces_num++].iface = iface;
 		}
-		if (index->eps_num == USB_MAX_EP_NUM)
-			break;
+		if (desc_type == USB_DT_ENDPOINT && index->ifaces_num > 0) {
+			struct usb_iface_index* iface = &index->ifaces[index->ifaces_num - 1];
+			debug("parse_usb_descriptor: found endpoint #%u at %p\n", iface->eps_num, buffer + offset);
+			if (iface->eps_num < USB_MAX_EP_NUM)
+				iface->eps[iface->eps_num++] = (struct usb_endpoint_descriptor*)(buffer + offset);
+		}
 		offset += desc_length;
 	}
 
@@ -1917,7 +1936,15 @@ struct vusb_connect_descriptors {
 	struct vusb_connect_string_descriptor strs[0];
 } __attribute__((packed));
 
-static const char* default_string = "syzkaller";
+static const char default_string[] = {
+    8, USB_DT_STRING,
+    's', 0, 'y', 0, 'z', 0
+};
+
+static const char default_lang_id[] = {
+    4, USB_DT_STRING,
+    0x09, 0x04
+};
 
 static bool lookup_connect_response(struct vusb_connect_descriptors* descs, struct usb_device_index* index,
 				    struct usb_ctrlrequest* ctrl, char** response_data, uint32* response_length)
@@ -1939,13 +1966,18 @@ static bool lookup_connect_response(struct vusb_connect_descriptors* descs, stru
 				return true;
 			case USB_DT_STRING:
 				str_idx = (uint8)ctrl->wValue;
-				if (str_idx >= descs->strs_len) {
-					*response_data = (char*)default_string;
-					*response_length = strlen(default_string);
-				} else {
+				if (descs && str_idx < descs->strs_len) {
 					*response_data = descs->strs[str_idx].str;
 					*response_length = descs->strs[str_idx].len;
+					return true;
 				}
+				if (str_idx == 0) {
+					*response_data = (char*)&default_lang_id[0];
+					*response_length = default_lang_id[0];
+					return true;
+				}
+				*response_data = (char*)&default_string[0];
+				*response_length = default_string[0];
 				return true;
 			case USB_DT_BOS:
 				*response_data = descs->bos;
@@ -1956,17 +1988,17 @@ static bool lookup_connect_response(struct vusb_connect_descriptors* descs, stru
 				*response_length = descs->qual_len;
 				return true;
 			default:
-				fail("syz_usb_connect: no response");
+				fail("lookup_connect_response: no response");
 				return false;
 			}
 			break;
 		default:
-			fail("syz_usb_connect: no response");
+			fail("lookup_connect_response: no response");
 			return false;
 		}
 		break;
 	default:
-		fail("syz_usb_connect: no response");
+		fail("lookup_connect_response: no response");
 		return false;
 	}
 
@@ -1997,7 +2029,7 @@ static volatile long syz_usb_connect(volatile long a0, volatile long a1, volatil
 		debug("syz_usb_connect: parse_usb_descriptor failed with %d\n", rv);
 		return rv;
 	}
-	debug("syz_usb_connect: parsed usb descriptor, %d endpoints found\n", index.eps_num);
+	debug("syz_usb_connect: parsed usb descriptor\n");
 
 	int fd = usb_fuzzer_open();
 	if (fd < 0) {
@@ -2034,7 +2066,7 @@ static volatile long syz_usb_connect(volatile long a0, volatile long a1, volatil
 		if (event.inner.type != USB_FUZZER_EVENT_CONTROL)
 			continue;
 
-		debug("syz_usb_connect: bRequestType: 0x%x (%s), bRequest: 0x%x, wValue: 0x%x, wIndex: 0x%x, wLength: %d\n",
+		debug("syz_usb_connect: bReqType: 0x%x (%s), bReq: 0x%x, wVal: 0x%x, wIdx: 0x%x, wLen: %d\n",
 		      event.ctrl.bRequestType, (event.ctrl.bRequestType & USB_DIR_IN) ? "IN" : "OUT",
 		      event.ctrl.bRequest, event.ctrl.wValue, event.ctrl.wIndex, event.ctrl.wLength);
 
@@ -2069,10 +2101,10 @@ static volatile long syz_usb_connect(volatile long a0, volatile long a1, volatil
 				return rv;
 			}
 			unsigned ep;
-			for (ep = 0; ep < index.eps_num; ep++) {
-				rv = usb_fuzzer_ep_enable(fd, index.eps[ep]);
+			for (ep = 0; ep < index.ifaces[0].eps_num; ep++) {
+				rv = usb_fuzzer_ep_enable(fd, index.ifaces[0].eps[ep]);
 				if (rv < 0) {
-					debug("syz_usb_connect: usb_fuzzer_ep_enable failed with %d\n", rv);
+					debug("syz_usb_connect: usb_fuzzer_ep_enable(%d) failed with %d\n", ep, rv);
 				} else {
 					debug("syz_usb_connect: endpoint %d enabled\n", ep);
 				}
@@ -2092,11 +2124,14 @@ static volatile long syz_usb_connect(volatile long a0, volatile long a1, volatil
 		else
 			memset(&response.data[0], 0, response_length);
 
-		debug("syz_usb_connect: reply length = %d\n", response.inner.length);
-		if (event.ctrl.bRequestType & USB_DIR_IN)
+		if (event.ctrl.bRequestType & USB_DIR_IN) {
+			debug("syz_usb_connect: writing %d bytes\n", response.inner.length);
 			rv = usb_fuzzer_ep0_write(fd, (struct usb_fuzzer_ep_io*)&response);
-		else
+		} else {
 			rv = usb_fuzzer_ep0_read(fd, (struct usb_fuzzer_ep_io*)&response);
+			debug("syz_usb_connect: read %d bytes\n", response.inner.length);
+			debug_dump_data(&event.data[0], response.inner.length);
+		}
 		if (rv < 0) {
 			debug("syz_usb_connect: usb_fuzzer_ep0_read/write failed with %d\n", rv);
 			return rv;
@@ -2140,8 +2175,13 @@ struct vusb_responses {
 static bool lookup_control_response(struct vusb_descriptors* descs, struct vusb_responses* resps,
 				    struct usb_ctrlrequest* ctrl, char** response_data, uint32* response_length)
 {
-	int descs_num = (descs->len - offsetof(struct vusb_descriptors, descs)) / sizeof(descs->descs[0]);
-	int resps_num = (resps->len - offsetof(struct vusb_responses, resps)) / sizeof(resps->resps[0]);
+	int descs_num = 0;
+	int resps_num = 0;
+
+	if (descs)
+		descs_num = (descs->len - offsetof(struct vusb_descriptors, descs)) / sizeof(descs->descs[0]);
+	if (resps)
+		resps_num = (resps->len - offsetof(struct vusb_responses, resps)) / sizeof(resps->resps[0]);
 
 	uint8 req = ctrl->bRequest;
 	uint8 req_type = ctrl->bRequestType & USB_TYPE_MASK;
@@ -2164,7 +2204,7 @@ static bool lookup_control_response(struct vusb_descriptors* descs, struct vusb_
 			}
 		}
 
-		if (descs->generic) {
+		if (descs && descs->generic) {
 			*response_data = &descs->generic->data[0];
 			*response_length = descs->generic->len;
 			return true;
@@ -2186,7 +2226,7 @@ static bool lookup_control_response(struct vusb_descriptors* descs, struct vusb_
 			}
 		}
 
-		if (resps->generic) {
+		if (resps && resps->generic) {
 			*response_data = &resps->generic->data[0];
 			*response_length = resps->generic->len;
 			return true;
@@ -2253,7 +2293,7 @@ static volatile long syz_usb_control_io(volatile long a0, volatile long a1, vola
 		return -1;
 	}
 
-	debug("syz_usb_control_io: bRequestType: 0x%x (%s), bRequest: 0x%x, wValue: 0x%x, wIndex: 0x%x, wLength: %d\n",
+	debug("syz_usb_control_io: bReqType: 0x%x (%s), bReq: 0x%x, wVal: 0x%x, wIdx: 0x%x, wLen: %d\n",
 	      event.ctrl.bRequestType, (event.ctrl.bRequestType & USB_DIR_IN) ? "IN" : "OUT",
 	      event.ctrl.bRequest, event.ctrl.wValue, event.ctrl.wIndex, event.ctrl.wLength);
 
@@ -2288,12 +2328,12 @@ static volatile long syz_usb_control_io(volatile long a0, volatile long a1, vola
 		memset(&response.data[0], 0, response_length);
 
 	if (event.ctrl.bRequestType & USB_DIR_IN) {
-		debug("syz_usb_control_io: IN, length = %d\n", response.inner.length);
+		debug("syz_usb_control_io: writing %d bytes\n", response.inner.length);
 		debug_dump_data(&response.data[0], response.inner.length);
 		rv = usb_fuzzer_ep0_write(fd, (struct usb_fuzzer_ep_io*)&response);
 	} else {
 		rv = usb_fuzzer_ep0_read(fd, (struct usb_fuzzer_ep_io*)&response);
-		debug("syz_usb_control_io: OUT, length = %d\n", response.inner.length);
+		debug("syz_usb_control_io: read %d bytes\n", response.inner.length);
 		debug_dump_data(&event.data[0], response.inner.length);
 	}
 	if (rv < 0) {
