@@ -2,11 +2,13 @@
 
 ## Reported by syzbot
 
-[Reported by the USB fuzzing instance](https://groups.google.com/forum/#!searchin/syzkaller-bugs/%22usb-fuzzer%22%7Csort:date)
+Starting from early 2019, bugs in the USB drivers are being automatically reported by the USB fuzzing instance of syzbot and can be found [here](https://syzkaller.appspot.com/upstream?manager=ci2-upstream-usb). A list of CVEs for some of those can be found here [here](https://www.openwall.com/lists/oss-security/2019/08/20/2).
 
-[Reported by the KMSAN fuzzing instance](https://groups.google.com/forum/#!searchin/syzkaller-bugs/%22kmsan%22$20%22usb%22%7Csort:date)
+Some of the USB bugs are reported by the KMSAN fuzzing instance and can be either found [here](https://groups.google.com/forum/#!searchin/syzkaller-bugs/%22kmsan%22$20%22usb%22%7Csort:date) or [here](https://syzkaller.appspot.com/upstream?manager=ci-upstream-kmsan-gce) (via a manual search, e.g. for `kernel-usb-infoleak`).
 
 ## Manually reported
+
+These are the bugs that were manually reported before USB fuzzing was integrated into syzbot.
 
 ### USB drivers
 

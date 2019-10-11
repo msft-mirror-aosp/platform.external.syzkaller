@@ -79,7 +79,7 @@ Use of this source code is governed by Apache 2 LICENSE that can be found in the
 		{{end}}
 		<th><a onclick="return sortTable(this, 'Title', textSort)" href="#">Title</a></th>
 		<th><a onclick="return sortTable(this, 'Repro', reproSort)" href="#">Repro</a></th>
-		<th><a onclick="return sortTable(this, 'Bisected', yesSort)" href="#">Bisected</a></th>
+		<th><a onclick="return sortTable(this, 'Bisected', textSort)" href="#">Bisected</a></th>
 		<th><a onclick="return sortTable(this, 'Count', numSort)" href="#">Count</a></th>
 		<th><a onclick="return sortTable(this, 'Last', timeSort)" href="#">Last</a></th>
 		<th><a onclick="return sortTable(this, 'Reported', timeSort)" href="#">Reported</a></th>
@@ -101,7 +101,15 @@ Use of this source code is governed by Apache 2 LICENSE that can be found in the
 			{{if $.ShowNamespace}}<td>{{$b.Namespace}}</td>{{end}}
 			<td class="title"><a href="{{$b.Link}}">{{$b.Title}}</a></td>
 			<td class="stat">{{formatReproLevel $b.ReproLevel}}</td>
-			<td class="stat">{{if $b.BisectCause}}yes{{end}}</td>
+			<td class="stat">
+				{{if and $b.BisectCauseDone $b.BisectFixDone}}
+					cause+fix
+				{{else if $b.BisectCauseDone}}
+					cause
+				{{else if $b.BisectFixDone}}
+					fix
+				{{end}}
+			</td>
 			<td class="stat {{if $b.NumCrashesBad}}bad{{end}}">{{$b.NumCrashes}}</td>
 			<td class="stat">{{formatLateness $.Now $b.LastTime}}</td>
 			<td class="stat">
@@ -221,5 +229,57 @@ Use of this source code is governed by Apache 2 LICENSE that can be found in the
 		{{end}}
 		{{link $com.Link $com.Title}}
 	</span>
+{{end}}
+{{end}}
+
+{{/* Show bisection results */}}
+{{define "bisect_results"}}
+{{if .}}
+	{{$causeJob := 1}}
+	{{$fixJob := 2}}
+	{{if .ErrorLink}}
+		<b>Bisection: {{link .ErrorLink "error"}}
+		({{link .LogLink "bisect log"}})</b><br>
+	{{else if .Commit}}
+		{{if eq .Type $causeJob}}
+			<b>Bisection: introduced by</b>
+		{{else if eq .Type $fixJob}}
+			<b>Bisection: fixed by</b>
+		{{end}}
+		<b>({{link .LogLink "bisect log"}}):</b><br>
+		<br><span class="mono">
+		commit {{.Commit.Hash}}<br>
+		Author: {{.Commit.Author}}<br>
+		Date:   {{formatKernelTime .Commit.Date}}<br>
+		<br>
+		&nbsp;&nbsp;{{.Commit.Title}}<br>
+		</span><br>
+	{{else if .Commits}}
+		{{if eq .Type $causeJob}}
+			<b>Bisection: the cause commit could be any of</b>
+		{{else if eq .Type $fixJob}}
+			<b>Bisection: the fix commit could be any of</b>
+		{{end}}
+		<b>({{link .LogLink "bisect log"}}):</b><br>
+		<br><span class="mono">
+		{{range $com := .Commits}}
+			&nbsp;&nbsp;{{formatTagHash $com.Hash}} {{$com.Title}}<br>
+		{{end}}
+		</span>
+	{{else}}
+		{{if eq .Type $causeJob}}
+			<b>Bisection: the bug happens on the oldest tested release</b>
+		{{else if eq .Type $fixJob}}
+			<b>Bisection: the bug occurs on the latest tested release</b>
+		{{end}}
+		<br>
+	{{end}}
+	Tree: <span title="{{.Manager}}">{{.KernelAlias}}</span><br>
+	{{if .CrashLogLink}}
+		Crash: {{link .CrashReportLink .CrashTitle}} ({{link .CrashLogLink "log"}})<br>
+		Repro: {{optlink .Crash.ReproCLink "C"}}
+		{{optlink .Crash.ReproSyzLink "syz"}}
+		{{optlink .Crash.KernelConfigLink ".config"}}<br>
+	{{end}}
 {{end}}
 {{end}}

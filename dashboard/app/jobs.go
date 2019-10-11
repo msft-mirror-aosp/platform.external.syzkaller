@@ -507,6 +507,9 @@ func doneJob(c context.Context, req *dashapi.JobDoneReq) error {
 			} else {
 				bug.BisectFix = result
 			}
+			// If the crash still occurs on HEAD, update the bug's LastTime so that it will be
+			// retried after 30 days.
+			crashesOnHead(c, bug, job, req, now)
 			if _, err := db.Put(c, bugKey, bug); err != nil {
 				return fmt.Errorf("failed to put bug: %v", err)
 			}
@@ -536,6 +539,14 @@ func doneJob(c context.Context, req *dashapi.JobDoneReq) error {
 	return db.RunInTransaction(c, tx, &db.TransactionOptions{XG: true, Attempts: 30})
 }
 
+func crashesOnHead(c context.Context, bug *Bug, job *Job, req *dashapi.JobDoneReq, now time.Time) {
+	if job.Type != JobBisectFix || req.Error != nil || len(req.Commits) != 0 || len(req.CrashLog) == 0 {
+		return
+	}
+	bug.BisectFix = BisectNot
+	bug.LastTime = now
+}
+
 func pollCompletedJobs(c context.Context, typ string) ([]*dashapi.BugReport, error) {
 	var jobs []*Job
 	keys, err := db.NewQuery("Job").
@@ -551,18 +562,25 @@ func pollCompletedJobs(c context.Context, typ string) ([]*dashapi.BugReport, err
 			log.Criticalf(c, "no reporting for job %v", extJobID(keys[i]))
 			continue
 		}
-		// TODO: this is temporary and will be removed once support for sending
-		// JobBisectFix result emails is implemented.
-		if job.Type == JobBisectFix {
-			continue
-		}
 		reporting := config.Namespaces[job.Namespace].ReportingByName(job.Reporting)
 		if reporting.Config.Type() != typ {
 			continue
 		}
+		// TODO: reporting fix bisection is disabled until issue #1371 is resolved.
+		if !appengine.IsDevAppServer() && job.Type == JobBisectFix {
+			continue
+		}
+		// TODO: fix bisection results are only supported for email at the moment.
+		if !appengine.IsDevAppServer() && job.Type == JobBisectFix && typ != emailType {
+			continue
+		}
 		// TODO: this is temporal for gradual bisection rollout.
-		// Notify only about successful bisection for now.
-		if !appengine.IsDevAppServer() && job.Type != JobTestPatch && len(job.Commits) != 1 {
+		// Notify only about successful cause bisection for now.
+		if !appengine.IsDevAppServer() && job.Type == JobBisectCause && len(job.Commits) != 1 {
+			continue
+		}
+		// If BisectFix results in a crash on HEAD, no notification is sent out.
+		if job.Type == JobBisectFix && len(job.Commits) != 1 {
 			continue
 		}
 		rep, err := createBugReportForJob(c, job, keys[i], reporting.Config)
@@ -675,6 +693,7 @@ func bisectFromJob(c context.Context, rep *dashapi.BugReport, job *Job) *dashapi
 		LogLink:         externalLink(c, textLog, job.Log),
 		CrashLogLink:    externalLink(c, textCrashLog, job.CrashLog),
 		CrashReportLink: externalLink(c, textCrashReport, job.CrashReport),
+		Fix:             job.Type == JobBisectFix,
 	}
 	for _, com := range job.Commits {
 		bisect.Commits = append(bisect.Commits, &dashapi.Commit{
