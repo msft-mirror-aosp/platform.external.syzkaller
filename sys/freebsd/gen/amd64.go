@@ -271,7 +271,7 @@ var structDescs_amd64 = []*KeyedStruct{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "type", TypeSize: 1}}},
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "code", TypeSize: 1}}},
 		&CsumType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "csum", FldName: "csum", TypeSize: 2}, ArgFormat: 1}, Buf: "parent"},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "id", TypeSize: 2}, ArgFormat: 1}, Kind: 2, RangeBegin: 100, RangeEnd: 104},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "id", TypeSize: 2}, ArgFormat: 1}, Kind: 1, RangeBegin: 100, RangeEnd: 104},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "seq_num", TypeSize: 2}, ArgFormat: 1}},
 		&BufferType{TypeCommon: TypeCommon{TypeName: "array", FldName: "data", IsVarlen: true}},
 	}}},
@@ -301,7 +301,7 @@ var structDescs_amd64 = []*KeyedStruct{
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "ecn", TypeSize: 1}, BitfieldLen: 2, BitfieldMdl: true}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "dscp", TypeSize: 1}, BitfieldOff: 2, BitfieldLen: 6}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "total_len", TypeSize: 2}, ArgFormat: 1}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "id", TypeSize: 2}, ArgFormat: 1}, Kind: 2, RangeBegin: 100, RangeEnd: 104},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "id", TypeSize: 2}, ArgFormat: 1}, Kind: 1, RangeBegin: 100, RangeEnd: 104},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "frag_off", TypeSize: 2}, ArgFormat: 1}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "ttl", TypeSize: 1}}},
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "ipv4_types", FldName: "protocol", TypeSize: 1}}, Vals: []uint64{1, 2, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 42, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 108, 108, 135, 136, 139, 140, 103, 112, 113, 137, 240}},
@@ -664,7 +664,7 @@ var structDescs_amd64 = []*KeyedStruct{
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "ecn", TypeSize: 1}, BitfieldLen: 2, BitfieldMdl: true}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "dscp", TypeSize: 1}, BitfieldOff: 2, BitfieldLen: 6}},
 		&LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", FldName: "total_len", TypeSize: 2}, ArgFormat: 1}, Path: []string{"ipv4_packet"}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "id", TypeSize: 2}, ArgFormat: 1}, Kind: 2, RangeBegin: 100, RangeEnd: 104},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "id", TypeSize: 2}, ArgFormat: 1}, Kind: 1, RangeBegin: 100, RangeEnd: 104},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16be", FldName: "frag_off", TypeSize: 2}, ArgFormat: 1}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "ttl", TypeSize: 1}}},
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "ipv4_types", FldName: "protocol", TypeSize: 1}}, Vals: []uint64{1, 2, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 42, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 108, 108, 135, 136, 139, 140, 103, 112, 113, 137, 240}},
@@ -905,7 +905,7 @@ var structDescs_amd64 = []*KeyedStruct{
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "m_flag", TypeSize: 1}, BitfieldLen: 1, BitfieldMdl: true}},
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "reserved2", TypeSize: 1}, BitfieldOff: 1, BitfieldLen: 2, BitfieldMdl: true}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "fragment_off_lo", TypeSize: 1}, BitfieldOff: 3, BitfieldLen: 5}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "identification", TypeSize: 4}}, Kind: 2, RangeBegin: 100, RangeEnd: 104},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "identification", TypeSize: 4}}, Kind: 1, RangeBegin: 100, RangeEnd: 104},
 	}, AlignAttr: 8}},
 	{Key: StructKey{Name: "ipv6_hopots_ext_header"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "ipv6_hopots_ext_header", IsVarlen: true}, Fields: []Type{
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "ipv6_types", FldName: "next_header", TypeSize: 1}}, Vals: []uint64{4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 108, 108, 135, 136, 139, 140, 103, 112, 113, 137, 240}},
@@ -1070,10 +1070,10 @@ var structDescs_amd64 = []*KeyedStruct{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "pad1", TypeSize: 8}}},
 	}}},
 	{Key: StructKey{Name: "pfioc_if"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "pfioc_if", TypeSize: 1}, Fields: []Type{
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "ifname", TypeSize: 1}}, Kind: 2, RangeBegin: 16, RangeEnd: 16},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "ifname", TypeSize: 1}}, Val: 16},
 	}}},
 	{Key: StructKey{Name: "pfioc_iface"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "pfioc_iface", TypeSize: 32}, Fields: []Type{
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int8", FldName: "pfiio_name", TypeSize: 1}}, Kind: 2, RangeBegin: 16, RangeEnd: 16},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "pfiio_name", TypeSize: 1}}, Val: 16},
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "pad", TypeSize: 7}}, IsPad: true},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "pfiio_buffer", TypeSize: 8}, Type: &BufferType{TypeCommon: TypeCommon{TypeName: "array", IsVarlen: true}}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "pfiio_esize", TypeSize: 4}}},
@@ -1476,6 +1476,14 @@ var structDescs_amd64 = []*KeyedStruct{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "msg_flags", TypeSize: 4}}},
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "pad", TypeSize: 4}}, IsPad: true},
 	}}},
+	{Key: StructKey{Name: "sf_hdtr"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "sf_hdtr", TypeSize: 32}, Fields: []Type{
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "headers", TypeSize: 8}, Type: &ArrayType{TypeCommon: TypeCommon{TypeName: "array", IsVarlen: true}, Type: &StructType{Key: StructKey{Name: "iovec_in"}}}},
+		&LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", FldName: "hdr_cnt", TypeSize: 4}}, Path: []string{"headers"}},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "pad", TypeSize: 4}}, IsPad: true},
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "trailers", TypeSize: 8}, Type: &ArrayType{TypeCommon: TypeCommon{TypeName: "array", IsVarlen: true}, Type: &StructType{Key: StructKey{Name: "iovec_in"}}}},
+		&LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", FldName: "trl_cnt", TypeSize: 4}}, Path: []string{"trailers"}},
+		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "pad", TypeSize: 4}}, IsPad: true},
+	}}},
 	{Key: StructKey{Name: "shmid_ds"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "shmid_ds", TypeSize: 112}, Fields: []Type{
 		&StructType{Key: StructKey{Name: "ipc_perm"}, FldName: "perm"},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int32", FldName: "segsz", TypeSize: 4}}},
@@ -1783,13 +1791,13 @@ var structDescs_amd64 = []*KeyedStruct{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "tpid", TypeSize: 2}, ArgFormat: 1}, Val: 34984},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "pcp", TypeSize: 2}, BitfieldLen: 3, BitfieldMdl: true}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "dei", TypeSize: 2}, BitfieldOff: 3, BitfieldLen: 1, BitfieldMdl: true}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "vid", TypeSize: 2}, BitfieldOff: 4, BitfieldLen: 12}, Kind: 2, RangeEnd: 4},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "vid", TypeSize: 2}, BitfieldOff: 4, BitfieldLen: 12}, Kind: 1, RangeEnd: 4},
 	}}},
 	{Key: StructKey{Name: "vlan_tag_q"}, Desc: &StructDesc{TypeCommon: TypeCommon{TypeName: "vlan_tag_q", TypeSize: 4}, Fields: []Type{
 		&ConstType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "const", FldName: "tpid", TypeSize: 2}, ArgFormat: 1}, Val: 33024},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "pcp", TypeSize: 2}, BitfieldLen: 3, BitfieldMdl: true}},
 		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "dei", TypeSize: 2}, BitfieldOff: 3, BitfieldLen: 1, BitfieldMdl: true}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "vid", TypeSize: 2}, BitfieldOff: 4, BitfieldLen: 12}, Kind: 2, RangeEnd: 4},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int16", FldName: "vid", TypeSize: 2}, BitfieldOff: 4, BitfieldLen: 12}, Kind: 1, RangeEnd: 4},
 	}}},
 }
 
@@ -3265,7 +3273,7 @@ var syscalls_amd64 = []*Syscall{
 	}},
 	{NR: 478, Name: "lseek", CallName: "lseek", Args: []Type{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fd", TypeSize: 4}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "fileoff", FldName: "offset", TypeSize: 8}}, Kind: 1},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "offset", TypeSize: 8}}},
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "seek_whence", FldName: "whence", TypeSize: 8}}, Vals: []uint64{0, 1, 2, 3, 4}},
 	}},
 	{NR: 75, Name: "madvise", CallName: "madvise", Args: []Type{
@@ -3306,7 +3314,7 @@ var syscalls_amd64 = []*Syscall{
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "mmap_prot", FldName: "prot", TypeSize: 8}}, Vals: []uint64{4, 1, 2}, BitMask: true},
 		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "mmap_flags", FldName: "flags", TypeSize: 8}}, Vals: []uint64{1, 2, 524288, 4096, 0, 16, 1024}, BitMask: true},
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fd", TypeSize: 4}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "fileoff", FldName: "offset", TypeSize: 8}}, Kind: 1},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "offset", TypeSize: 8}}},
 	}},
 	{NR: 74, Name: "mprotect", CallName: "mprotect", Args: []Type{
 		&VmaType{TypeCommon: TypeCommon{TypeName: "vma", FldName: "addr", TypeSize: 8}},
@@ -3413,13 +3421,13 @@ var syscalls_amd64 = []*Syscall{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fd", TypeSize: 4}},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "vec", TypeSize: 8}, Type: &ArrayType{TypeCommon: TypeCommon{TypeName: "array", IsVarlen: true}, Type: &StructType{Key: StructKey{Name: "iovec_out"}}}},
 		&LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", FldName: "vlen", TypeSize: 8}}, Path: []string{"vec"}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "fileoff", FldName: "off", TypeSize: 8}}, Kind: 1},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "off", TypeSize: 8}}},
 	}},
 	{NR: 290, Name: "pwritev", CallName: "pwritev", Args: []Type{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fd", TypeSize: 4}},
 		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "vec", TypeSize: 8}, Type: &ArrayType{TypeCommon: TypeCommon{TypeName: "array", IsVarlen: true}, Type: &StructType{Key: StructKey{Name: "iovec_in"}}}},
 		&LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", FldName: "vlen", TypeSize: 8}}, Path: []string{"vec"}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "fileoff", FldName: "off", TypeSize: 8}}, Kind: 1},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "off", TypeSize: 8}}},
 	}},
 	{NR: 3, Name: "read", CallName: "read", Args: []Type{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fd", TypeSize: 4}},
@@ -3515,10 +3523,13 @@ var syscalls_amd64 = []*Syscall{
 		&LenType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "len", FldName: "nops", TypeSize: 8}}, Path: []string{"ops"}},
 	}},
 	{NR: 393, Name: "sendfile", CallName: "sendfile", Args: []Type{
-		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fdout", TypeSize: 4}},
-		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fdin", TypeSize: 4}},
-		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "off", TypeSize: 8, IsOptional: true}, Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "fileoff", TypeSize: 8, ArgDir: 2}}, Kind: 1}},
-		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int64", FldName: "count", TypeSize: 8}}},
+		&ResourceType{TypeCommon: TypeCommon{TypeName: "fd", FldName: "fd", TypeSize: 4}},
+		&ResourceType{TypeCommon: TypeCommon{TypeName: "sock_in", FldName: "s", TypeSize: 4}},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "intptr", FldName: "offset", TypeSize: 8}}},
+		&IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int64", FldName: "nbytes", TypeSize: 8}}},
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "hdtr", TypeSize: 8}, Type: &StructType{Key: StructKey{Name: "sf_hdtr"}}},
+		&PtrType{TypeCommon: TypeCommon{TypeName: "ptr", FldName: "sbytes", TypeSize: 8}, Type: &IntType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "int64", TypeSize: 8, ArgDir: 1}}}},
+		&FlagsType{IntTypeCommon: IntTypeCommon{TypeCommon: TypeCommon{TypeName: "sf_flags", FldName: "flags", TypeSize: 8}}, Vals: []uint64{1, 16, 4, 8}, BitMask: true},
 	}},
 	{NR: 28, Name: "sendmsg", CallName: "sendmsg", Args: []Type{
 		&ResourceType{TypeCommon: TypeCommon{TypeName: "sock", FldName: "fd", TypeSize: 4}},
@@ -5104,6 +5115,7 @@ var consts_amd64 = []ConstValue{
 	{Name: "IPPROTO_CMTP", Value: 38},
 	{Name: "IPPROTO_CPHB", Value: 73},
 	{Name: "IPPROTO_CPNX", Value: 72},
+	{Name: "IPPROTO_DCCP", Value: 33},
 	{Name: "IPPROTO_DDP", Value: 37},
 	{Name: "IPPROTO_DGP", Value: 86},
 	{Name: "IPPROTO_DSTOPTS", Value: 60},
@@ -5173,7 +5185,6 @@ var consts_amd64 = []ConstValue{
 	{Name: "IPPROTO_SCCSP", Value: 96},
 	{Name: "IPPROTO_SCTP", Value: 132},
 	{Name: "IPPROTO_SDRP", Value: 42},
-	{Name: "IPPROTO_SEP", Value: 33},
 	{Name: "IPPROTO_SHIM6", Value: 140},
 	{Name: "IPPROTO_SKIP", Value: 57},
 	{Name: "IPPROTO_SRPC", Value: 90},
@@ -5458,6 +5469,10 @@ var consts_amd64 = []ConstValue{
 	{Name: "SEM_UNDO", Value: 4096},
 	{Name: "SETALL", Value: 9},
 	{Name: "SETVAL", Value: 8},
+	{Name: "SF_NOCACHE", Value: 16},
+	{Name: "SF_NODISKIO", Value: 1},
+	{Name: "SF_SYNC", Value: 4},
+	{Name: "SF_USER_READAHEAD", Value: 8},
 	{Name: "SHM_INFO", Value: 14},
 	{Name: "SHM_LOCK", Value: 11},
 	{Name: "SHM_RDONLY", Value: 4096},
@@ -5715,4 +5730,4 @@ var consts_amd64 = []ConstValue{
 	{Name: "WUNTRACED", Value: 2},
 }
 
-const revision_amd64 = "8a3bca2af862d54553a68c1871a0802a78b1f5e2"
+const revision_amd64 = "815f5db6dcecab76362979cf14f2ca92009abebf"

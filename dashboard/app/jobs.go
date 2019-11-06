@@ -266,7 +266,7 @@ func findBugsForBisection(c context.Context, managers map[string]bool, reproLeve
 		if !shouldBisectBug(bug, managers) {
 			continue
 		}
-		crash, crashKey, err := bisectCrashForBug(c, keys[bi], managers)
+		crash, crashKey, err := bisectCrashForBug(c, bug, keys[bi], managers, jobType)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -293,7 +293,7 @@ func shouldBisectBug(bug *Bug, managers map[string]bool) bool {
 	return false
 }
 
-func bisectCrashForBug(c context.Context, bugKey *db.Key, managers map[string]bool) (
+func bisectCrashForBug(c context.Context, bug *Bug, bugKey *db.Key, managers map[string]bool, jobType JobType) (
 	*Crash, *db.Key, error) {
 	crashes, crashKeys, err := queryCrashesForBug(c, bugKey, maxCrashes)
 	if err != nil {
@@ -303,9 +303,25 @@ func bisectCrashForBug(c context.Context, bugKey *db.Key, managers map[string]bo
 		if crash.ReproSyz == 0 || !managers[crash.Manager] {
 			continue
 		}
+		if ok, err := shouldBisectCrash(c, bug, crash, jobType); err != nil {
+			return nil, nil, err
+		} else if !ok {
+			continue
+		}
 		return crash, crashKeys[ci], nil
 	}
 	return nil, nil, nil
+}
+
+func shouldBisectCrash(c context.Context, bug *Bug, crash *Crash, jobType JobType) (bool, error) {
+	if jobType != JobBisectFix {
+		return true, nil
+	}
+	build, err := loadBuild(c, bug.Namespace, crash.BuildID)
+	if err != nil {
+		return false, err
+	}
+	return !kernelRepoInfo(build).FixBisectionDisabled, nil
 }
 
 func createBisectJobForBug(c context.Context, bug0 *Bug, crash *Crash, bugKey, crashKey *db.Key, jobType JobType) (
@@ -581,6 +597,17 @@ func pollCompletedJobs(c context.Context, typ string) ([]*dashapi.BugReport, err
 		}
 		// If BisectFix results in a crash on HEAD, no notification is sent out.
 		if job.Type == JobBisectFix && len(job.Commits) != 1 {
+			continue
+		}
+		// If the bug is already known to be fixed, invalid or duplicate, do not report the
+		// bisection results.
+		bug := new(Bug)
+		bugKey := keys[i].Parent()
+		if err := db.Get(c, bugKey, bug); err != nil {
+			return nil, fmt.Errorf("job %v: failed to get bug: %v", extJobID(keys[i]), err)
+		}
+		if len(bug.Commits) != 0 || bug.Status != BugStatusOpen {
+			jobReported(c, extJobID(keys[i]))
 			continue
 		}
 		rep, err := createBugReportForJob(c, job, keys[i], reporting.Config)

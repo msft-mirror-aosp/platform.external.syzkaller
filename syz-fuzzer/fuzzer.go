@@ -6,11 +6,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +51,8 @@ type Fuzzer struct {
 	corpusMu     sync.RWMutex
 	corpus       []*prog.Prog
 	corpusHashes map[hash.Sig]struct{}
+	corpusPrios  []int64
+	sumPrios     int64
 
 	signalMu     sync.RWMutex
 	corpusSignal signal.Signal // signal of inputs in corpus
@@ -56,6 +60,12 @@ type Fuzzer struct {
 	newSignal    signal.Signal // diff of maxSignal since last sync with master
 
 	logMu sync.Mutex
+}
+
+type FuzzerSnapshot struct {
+	corpus      []*prog.Prog
+	corpusPrios []int64
+	sumPrios    int64
 }
 
 type Stat int
@@ -204,6 +214,9 @@ func main() {
 	config.Flags |= ipc.FlagEnableNetReset
 	config.Flags |= ipc.FlagEnableCgroups
 	config.Flags |= ipc.FlagEnableCloseFds
+	if r.CheckResult.Features[host.FeatureDevlinkPCI].Enabled {
+		config.Flags |= ipc.FlagEnableDevlinkPCI
+	}
 
 	if *flagRunTest {
 		runTest(target, manager, *flagName, config.Executor)
@@ -225,11 +238,9 @@ func main() {
 		comparisonTracingEnabled: r.CheckResult.Features[host.FeatureComparisons].Enabled,
 		corpusHashes:             make(map[hash.Sig]struct{}),
 	}
-	var gateCallback func()
-	if r.CheckResult.Features[host.FeatureLeakChecking].Enabled {
-		gateCallback = func() { fuzzer.gateCallback(r.MemoryLeakFrames) }
-	}
+	gateCallback := fuzzer.useBugFrames(r, *flagProcs)
 	fuzzer.gate = ipc.NewGate(2**flagProcs, gateCallback)
+
 	for i := 0; fuzzer.poll(i == 0, nil); i++ {
 	}
 	calls := make(map[*prog.Syscall]bool)
@@ -249,6 +260,21 @@ func main() {
 	}
 
 	fuzzer.pollLoop()
+}
+
+// Returns gateCallback for leak checking if enabled.
+func (fuzzer *Fuzzer) useBugFrames(r *rpctype.ConnectRes, flagProcs int) func() {
+	var gateCallback func()
+
+	if r.CheckResult.Features[host.FeatureLeakChecking].Enabled {
+		gateCallback = func() { fuzzer.gateCallback(r.MemoryLeakFrames) }
+	}
+
+	if r.CheckResult.Features[host.FeatureKCSAN].Enabled && len(r.DataRaceFrames) != 0 {
+		fuzzer.blacklistDataRaceFrames(r.DataRaceFrames)
+	}
+
+	return gateCallback
 }
 
 func (fuzzer *Fuzzer) gateCallback(leakFrames []string) {
@@ -273,6 +299,15 @@ func (fuzzer *Fuzzer) gateCallback(leakFrames []string) {
 	if triagedCandidates == 1 {
 		atomic.StoreUint32(&fuzzer.triagedCandidates, 2)
 	}
+}
+
+func (fuzzer *Fuzzer) blacklistDataRaceFrames(frames []string) {
+	args := append([]string{"setup_kcsan_blacklist"}, frames...)
+	output, err := osutil.RunCmd(10*time.Minute, "", fuzzer.config.Executor, args...)
+	if err != nil {
+		log.Fatalf("failed to set KCSAN blacklist: %v", err)
+	}
+	log.Logf(0, "%s", output)
 }
 
 func (fuzzer *Fuzzer) pollLoop() {
@@ -375,11 +410,25 @@ func (fuzzer *Fuzzer) addInputFromAnotherFuzzer(inp rpctype.RPCInput) {
 	fuzzer.addInputToCorpus(p, sign, sig)
 }
 
+func (fuzzer *FuzzerSnapshot) chooseProgram(r *rand.Rand) *prog.Prog {
+	randVal := r.Int63n(fuzzer.sumPrios + 1)
+	idx := sort.Search(len(fuzzer.corpusPrios), func(i int) bool {
+		return fuzzer.corpusPrios[i] >= randVal
+	})
+	return fuzzer.corpus[idx]
+}
+
 func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig) {
 	fuzzer.corpusMu.Lock()
 	if _, ok := fuzzer.corpusHashes[sig]; !ok {
 		fuzzer.corpus = append(fuzzer.corpus, p)
 		fuzzer.corpusHashes[sig] = struct{}{}
+		prio := int64(len(sign))
+		if sign.Empty() {
+			prio = 1
+		}
+		fuzzer.sumPrios += prio
+		fuzzer.corpusPrios = append(fuzzer.corpusPrios, fuzzer.sumPrios)
 	}
 	fuzzer.corpusMu.Unlock()
 
@@ -391,10 +440,10 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
 	}
 }
 
-func (fuzzer *Fuzzer) corpusSnapshot() []*prog.Prog {
+func (fuzzer *Fuzzer) snapshot() FuzzerSnapshot {
 	fuzzer.corpusMu.RLock()
 	defer fuzzer.corpusMu.RUnlock()
-	return fuzzer.corpus
+	return FuzzerSnapshot{fuzzer.corpus, fuzzer.corpusPrios, fuzzer.sumPrios}
 }
 
 func (fuzzer *Fuzzer) addMaxSignal(sign signal.Signal) {

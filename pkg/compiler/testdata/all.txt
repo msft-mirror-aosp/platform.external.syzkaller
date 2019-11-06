@@ -12,6 +12,8 @@ foo$7(a int8[-20:20])
 foo$8(a ptr[in, strings])
 foo$9(a ptr[out, ptr[in, string]])
 foo$10(a ptr[out, buffer[in]])
+foo$11(a int64[1:100, 2])
+foo$12(a int64[0:-1, 0x1000])
 
 resource r0[intptr]
 
@@ -166,6 +168,9 @@ foo$void8(a ptr[in, void])
 bitfield0 {
 	f1	int8:1
 	f2	int8:2
+	f3	int16:8[-127:0]
+	f4	int16:8[0:255]
+	f5	int64:64[-1:1]
 }
 
 foo$bitfield0(a ptr[in, bitfield0])
@@ -208,9 +213,9 @@ type templ_base1[TYPE, CONST] {
 	f1	TYPE
 }
 
-type templ_templ[BASE, CONST] {
-	f1	BASE[int8, CONST]
-	f2	BASE[int32, 0]
+type templ_templ[TMPL, CONST] {
+	f1	TMPL[int8, CONST]
+	f2	TMPL[int32, 0]
 }
 
 templ_templ_use {
@@ -224,6 +229,9 @@ type templ_struct4 templ_struct3
 type templ_struct5 templ_struct0[C1, templ_struct0[C2, int8]]
 type templ_struct6 templ_struct0[C1, templ_struct2[C2]]
 type templ_union union_with_templ_struct
+type templ_base3[BASE] BASE
+type templ_base4[BASE] const[0, BASE]
+type templ_base5[VAL, BASE] const[VAL, BASE]
 
 foo$templ0(a templ0[42, int8])
 foo$templ1(a ptr[in, templ_struct0[C2, int8]])
@@ -234,6 +242,9 @@ foo$templ5(a ptr[in, templ_struct1[3]])
 foo$templ6(a ptr[in, templ_struct4])
 foo$templ7(a ptr[in, templ_struct5], b ptr[in, templ_struct6], c ptr[in, templ_union], d ptr[in, type3])
 foo$templ8(a ptr[in, templ_templ_use])
+foo$templ9(a ptr[in, templ_base3[int64]])
+foo$templ10(a ptr[in, templ_base4[int8]])
+foo$templ11(a ptr[in, templ_base5[42, int8]])
 
 # Structs.
 

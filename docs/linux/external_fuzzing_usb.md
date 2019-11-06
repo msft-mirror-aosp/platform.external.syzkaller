@@ -29,13 +29,10 @@ More details can be found:
 
 A few major things that need to be done:
 
-1. Implement proper support for multiple interfaces per configuration.
-What currently is missing is enabling/disabling USB endpoints depending of which interface is set.
-This is required to properly emulate some USB devices like the CDC NCM class.
-2. Collect coverage from interrupts (this is required to enable better fuzzing of USB drivers after enumeration completes).
-3. Add descriptions for all main USB classes.
-4. Upstream KCOV changes.
-5. Upstream the kernel interface for USB device emulation.
+1. Collect coverage from interrupts (this is required to enable better fuzzing of USB drivers after enumeration completes).
+2. Add descriptions for all main USB classes.
+3. Upstream KCOV changes.
+4. Upstream the kernel interface for USB device emulation.
 
 Some ideas for things that can be done:
 
@@ -52,7 +49,7 @@ Syzkaller descriptions for USB fuzzing can be found [here](/sys/linux/vusb.txt).
 
 1. Checkout the `usb-fuzzer` branch from https://github.com/google/kasan
 
-2. Configure the kernel (at the very least `CONFIG_USB_FUZZER=y` and `CONFIG_USB_DUMMY_HCD=y` need to be enabled).
+2. Configure the kernel (at the very least `CONFIG_USB_RAW_GADGET=y` and `CONFIG_USB_DUMMY_HCD=y` need to be enabled).
 
     The easiest option is to use the [config](/dashboard/config/upstream-usb.config) from the syzbot USB fuzzing instance.
 
@@ -89,7 +86,7 @@ The instructions below describe a way to generate syzkaller USB IDs for all USB 
 
 2. Build and boot the kernel.
 
-3. Connect a USB HID device. In case you're using a `CONFIG_USB_FUZZER=y` kernel, use the provided [keyboard emulation program](/tools/syz-usbgen/keyboard.c).
+3. Connect a USB HID device. In case you're using a `CONFIG_USB_RAW_GADGET=y` kernel, use the provided [keyboard emulation program](/tools/syz-usbgen/keyboard.c).
 
 4. Use [syz-usbgen](/tools/syz-usbgen/usbgen.go) script to update [syzkaller descriptions](/sys/linux/init_vusb_ids.go):
 
@@ -143,10 +140,10 @@ These instructions describe how to set this up on a Raspberry Pi Zero W, but any
             // triggering interaction between multiple USB devices within the same program.
     -       char device[32];
     -       sprintf(&device[0], "dummy_udc.%llu", procid);
-    -       rv = usb_fuzzer_init(fd, speed, "dummy_udc", &device[0]);
-    +       rv = usb_fuzzer_init(fd, speed, "20980000.usb", "20980000.usb");
+    -       rv = usb_raw_init(fd, speed, "dummy_udc", &device[0]);
+    +       rv = usb_raw_init(fd, speed, "20980000.usb", "20980000.usb");
             if (rv < 0) {
-                    debug("syz_usb_connect: usb_fuzzer_init failed with %d\n", rv);
+                    debug("syz_usb_connect: usb_raw_init failed with %d\n", rv);
                     return rv;
     diff --git a/executor/executor.cc b/executor/executor.cc
     index 34949a01..1afcb288 100644
@@ -175,14 +172,14 @@ These instructions describe how to set this up on a Raspberry Pi Zero W, but any
     cp bin/linux_arm/syz-executor ~/syz-bin/
     ```
 
-10. Build `syz-execprog` on your host machine for arm32 with `make TARGETARCH=arm execprog` and copy to `~/syz-bin` onto the SD card.
+10. Build `syz-execprog` on your host machine for arm32 with `make TARGETARCH=arm execprog` and copy to `~/syz-bin` onto the SD card. You may try building syz-execprog on the Raspberry Pi itself, but that worked poorly for me due to large memory consumption during the compilation process.
 
 11. Make sure that ou can now execute syzkaller programs:
 
     ``` bash
     cat socket.log
     r0 = socket$inet_tcp(0x2, 0x1, 0x0)
-    sudo ./syz-bin/syz-execprog -executor ./syz-bin/syz-executor -threaded=0 -collide=0 -procs=1 -nocgroups -nonetdev -nonetreset -notun -debug socket.log
+    sudo ./syz-bin/syz-execprog -executor ./syz-bin/syz-executor -threaded=0 -collide=0 -procs=1 -enable='' -debug socket.log
     ```
 
 12. Setup the dwc2 USB gadget driver:
@@ -195,37 +192,37 @@ These instructions describe how to set this up on a Raspberry Pi Zero W, but any
 
 13. Get Linux kernel headers following [this](https://github.com/notro/rpi-source/wiki).
 
-14. Download the fuzzer module:
+14. Download the USB Raw Gadget module:
 
     ``` bash
     mkdir module
     cd module
-    wget https://raw.githubusercontent.com/google/kasan/usb-fuzzer/drivers/usb/gadget/fuzzer/fuzzer.c
-    wget https://raw.githubusercontent.com/google/kasan/usb-fuzzer/include/uapi/linux/usb/fuzzer.h
+    wget https://raw.githubusercontent.com/google/kasan/usb-fuzzer/drivers/usb/gadget/raw.c
+    wget https://raw.githubusercontent.com/google/kasan/usb-fuzzer/include/uapi/linux/usb/raw-gadget.h
     ```
 
     Apply the following change:
 
     ``` c
-    diff --git a/fuzzer.c b/fuzzer.c
+    diff --git a/raw.c b/raw.c
     index 308c540..68d43b9 100644
-    --- a/fuzzer.c
-    +++ b/fuzzer.c
+    --- a/raw.c
+    +++ b/raw.c
     @@ -17,7 +17,7 @@
      #include <linux/usb/gadgetfs.h>
      #include <linux/usb/gadget.h>
      
-    -#include <uapi/linux/usb/fuzzer.h>
-    +#include "fuzzer.h"
+    -#include <uapi/linux/usb/raw-gadget.h>
+    +#include "raw-gadget.h"
      
-     #define        DRIVER_DESC "USB fuzzer"
-     #define DRIVER_NAME "usb-fuzzer-gadget"
+     #define        DRIVER_DESC "USB Raw Gadget"
+     #define DRIVER_NAME "raw-gadget"
     ```
 
     Add a `Makefile`:
 
     ``` make
-    obj-m := fuzzer.o
+    obj-m := raw.o
     KDIR := /lib/modules/$(shell uname -r)/build
     PWD := $(shell pwd)
     default:
@@ -234,16 +231,35 @@ These instructions describe how to set this up on a Raspberry Pi Zero W, but any
 
     And build with `make`.
 
-15. Insert the module with `sudo insmod fuzzer.ko`.
+15. Insert the module with `sudo insmod raw.ko`.
 
-16. Build and test the [keyboard emulator program](https://raw.githubusercontent.com/google/syzkaller/up-usb-docs/tools/syz-usbgen/keyboard.c):
+16. Build and test the [keyboard emulator program](/tools/syz-usbgen/keyboard.c):
 
     ``` bash
     # Connect the board to some USB host.
-    wget https://raw.githubusercontent.com/google/syzkaller/up-usb-docs/tools/syz-usbgen/keyboard.c
+    wget https://raw.githubusercontent.com/google/syzkaller/master/tools/syz-usbgen/keyboard.c
+    # Apply the patch below.
     gcc keyboard.c -o keyboard
     sudo ./keyboard
     # Make sure you see the letter 'x' being entered on the host.
+    ```
+
+    ``` c
+    diff --git a/tools/syz-usbgen/keyboard.c b/tools/syz-usbgen/keyboard.c
+    index 2a6015d4..3ebd1e03 100644
+    --- a/tools/syz-usbgen/keyboard.c
+    +++ b/tools/syz-usbgen/keyboard.c
+    @@ -95,8 +95,8 @@ int usb_raw_open() {
+     void usb_raw_init(int fd, enum usb_device_speed speed) {
+            struct usb_raw_init arg;
+            arg.speed = speed;
+    -       arg.driver_name = "dummy_udc";
+    -       arg.device_name = "dummy_udc.0";
+    +       arg.driver_name = "20980000.usb";
+    +       arg.device_name = "20980000.usb";
+            int rv = ioctl(fd, USB_RAW_IOCTL_INIT, &arg);
+            if (rv != 0) {
+                    perror("ioctl(USB_RAW_IOCTL_INIT)");
     ```
 
 17. You should now be able to execute syzkaller USB programs:
@@ -251,13 +267,15 @@ These instructions describe how to set this up on a Raspberry Pi Zero W, but any
     ``` bash
     $ cat usb.log
     r0 = syz_usb_connect(0x0, 0x24, &(0x7f00000001c0)={{0x12, 0x1, 0x0, 0x8e, 0x32, 0xf7, 0x20, 0xaf0, 0xd257, 0x4e87, 0x0, 0x0, 0x0, 0x1, [{{0x9, 0x2, 0x12, 0x1, 0x0, 0x0, 0x0, 0x0, [{{0x9, 0x4, 0xf, 0x0, 0x0, 0xff, 0xa5, 0x2c}}]}}]}}, 0x0)
-    $ sudo ./syz-bin/syz-execprog -executor ./syz-bin/syz-executor -threaded=0 -collide=0 -procs=1 -nocgroups -nonetdev -nonetreset -notun -debug usb.log
+    $ sudo ./syz-bin/syz-execprog -executor ./syz-bin/syz-executor -threaded=0 -collide=0 -procs=1 -enable='' -debug usb.log
     ```
 
-18. Follow [this](https://www.raspberrypi.org/documentation/configuration/wireless/access-point.md) to setup Wi-Fi hotspot.
+18. Steps 19 through 21 are optional. You may use a UART console and a normal USB cable instead of ssh and Zero Stem.
 
-19. Follow [this](https://www.raspberrypi.org/documentation/remote-access/ssh/) to enable ssh.
+19. Follow [this](https://www.raspberrypi.org/documentation/configuration/wireless/access-point.md) to setup Wi-Fi hotspot.
 
-20. Optionally solder [Zero Stem](https://zerostem.io/) onto your Raspberry Pi Zero W.
+20. Follow [this](https://www.raspberrypi.org/documentation/remote-access/ssh/) to enable ssh.
+
+21. Optionally solder [Zero Stem](https://zerostem.io/) onto your Raspberry Pi Zero W.
 
 21. You can now connect the board to an arbitrary USB port, wait for it to boot, join its Wi-Fi network, ssh onto it, and run arbitrary syzkaller USB programs.

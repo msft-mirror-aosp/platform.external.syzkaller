@@ -40,7 +40,8 @@ GO := go
 HOSTGO := go
 # By default, build all Go binaries as static. We don't need cgo and it is
 # known to cause problems at least on Android emulator.
-export CGO_ENABLED=0
+CGO_ENABLED ?= 0
+export CGO_ENABLED
 TARGETGOOS := $(TARGETOS)
 TARGETGOARCH := $(TARGETVMARCH)
 
@@ -171,6 +172,9 @@ trace2syz:
 
 usbgen:
 	GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-usbgen github.com/google/syzkaller/tools/syz-usbgen
+
+expand:
+	GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-expand github.com/google/syzkaller/tools/syz-expand
 
 # `extract` extracts const files from various kernel sources, and may only
 # re-generate parts of files.

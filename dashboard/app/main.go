@@ -107,17 +107,17 @@ type uiCommit struct {
 }
 
 type uiBugPage struct {
-	Header         *uiHeader
-	Now            time.Time
-	Bug            *uiBug
-	BisectCause    *uiJob
-	BisectFix      *uiJob
-	DupOf          *uiBugGroup
-	Dups           *uiBugGroup
-	Similar        *uiBugGroup
-	SampleReport   []byte
-	HasMaintainers bool
-	Crashes        []*uiCrash
+	Header        *uiHeader
+	Now           time.Time
+	Bug           *uiBug
+	BisectCause   *uiJob
+	BisectFix     *uiJob
+	DupOf         *uiBugGroup
+	Dups          *uiBugGroup
+	Similar       *uiBugGroup
+	SampleReport  []byte
+	Crashes       *uiCrashTable
+	FixBisections *uiCrashTable
 }
 
 type uiBugGroup struct {
@@ -165,6 +165,12 @@ type uiCrash struct {
 	ReproSyzLink string
 	ReproCLink   string
 	*uiBuild
+}
+
+type uiCrashTable struct {
+	Crashes        []*uiCrash
+	Caption        string
+	HasMaintainers bool
 }
 
 type uiJob struct {
@@ -308,20 +314,9 @@ func handleAdmin(c context.Context, w http.ResponseWriter, r *http.Request) erro
 
 // handleBug serves page about a single bug (which is passed in id argument).
 func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error {
-	bug := new(Bug)
-	if id := r.FormValue("id"); id != "" {
-		bugKey := db.NewKey(c, "Bug", id, 0, nil)
-		if err := db.Get(c, bugKey, bug); err != nil {
-			return err
-		}
-	} else if extID := r.FormValue("extid"); extID != "" {
-		var err error
-		bug, _, err = findBugByReportingID(c, extID)
-		if err != nil {
-			return err
-		}
-	} else {
-		return ErrDontLog(fmt.Errorf("mandatory parameter id/extid is missing"))
+	bug, err := findBugByID(c, r)
+	if err != nil {
+		return ErrDontLog{err}
 	}
 	accessLevel := accessLevel(c, r)
 	if err := checkAccessLevel(c, r, bug.sanitizeAccess(accessLevel)); err != nil {
@@ -358,6 +353,16 @@ func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
+	crashesTable := &uiCrashTable{
+		Crashes: crashes,
+		Caption: fmt.Sprintf("Crashes (%d)", bug.NumCrashes),
+	}
+	for _, crash := range crashesTable.Crashes {
+		if len(crash.Maintainers) != 0 {
+			crashesTable.HasMaintainers = true
+			break
+		}
+	}
 	dups, err := loadDupsForBug(c, r, bug, state, managers)
 	if err != nil {
 		return err
@@ -380,27 +385,48 @@ func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error 
 			return err
 		}
 	}
-	hasMaintainers := false
-	for _, crash := range crashes {
-		if len(crash.Maintainers) != 0 {
-			hasMaintainers = true
-			break
+	data := &uiBugPage{
+		Header:       hdr,
+		Now:          timeNow(c),
+		Bug:          uiBug,
+		BisectCause:  bisectCause,
+		BisectFix:    bisectFix,
+		DupOf:        dupOf,
+		Dups:         dups,
+		Similar:      similar,
+		SampleReport: sampleReport,
+		Crashes:      crashesTable,
+	}
+	// bug.BisectFix is set to BisectNot in two cases :
+	// - no fix bisections have been performed on the bug
+	// - fix bisection was performed but resulted in a crash on HEAD
+	if bug.BisectFix == BisectNot {
+		fixBisections, err := loadFixBisectionsForBug(c, bug)
+		if err != nil {
+			return err
+		}
+		if len(fixBisections) != 0 {
+			data.FixBisections = &uiCrashTable{
+				Crashes: fixBisections,
+				Caption: fmt.Sprintf("Fix bisections (%v)", len(fixBisections)),
+			}
 		}
 	}
-	data := &uiBugPage{
-		Header:         hdr,
-		Now:            timeNow(c),
-		Bug:            uiBug,
-		BisectCause:    bisectCause,
-		BisectFix:      bisectFix,
-		DupOf:          dupOf,
-		Dups:           dups,
-		Similar:        similar,
-		SampleReport:   sampleReport,
-		HasMaintainers: hasMaintainers,
-		Crashes:        crashes,
-	}
 	return serveTemplate(w, "bug.html", data)
+}
+
+func findBugByID(c context.Context, r *http.Request) (*Bug, error) {
+	if id := r.FormValue("id"); id != "" {
+		bug := new(Bug)
+		bugKey := db.NewKey(c, "Bug", id, 0, nil)
+		err := db.Get(c, bugKey, bug)
+		return bug, err
+	}
+	if extID := r.FormValue("extid"); extID != "" {
+		bug, _, err := findBugByReportingID(c, extID)
+		return bug, err
+	}
+	return nil, fmt.Errorf("mandatory parameter id/extid is missing")
 }
 
 func getUIJob(c context.Context, bug *Bug, jobType JobType) (*uiJob, error) {
@@ -426,23 +452,26 @@ func handleTextImpl(c context.Context, w http.ResponseWriter, r *http.Request, t
 	if x := r.FormValue("x"); x != "" {
 		xid, err := strconv.ParseUint(x, 16, 64)
 		if err != nil || xid == 0 {
-			return ErrDontLog(fmt.Errorf("failed to parse text id: %v", err))
+			return ErrDontLog{fmt.Errorf("failed to parse text id: %v", err)}
 		}
 		id = int64(xid)
 	} else {
 		// Old link support, don't remove.
 		xid, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
 		if err != nil || xid == 0 {
-			return ErrDontLog(fmt.Errorf("failed to parse text id: %v", err))
+			return ErrDontLog{fmt.Errorf("failed to parse text id: %v", err)}
 		}
 		id = xid
 	}
-	crash, err := checkTextAccess(c, r, tag, id)
+	bug, crash, err := checkTextAccess(c, r, tag, id)
 	if err != nil {
 		return err
 	}
 	data, ns, err := getText(c, tag, id)
 	if err != nil {
+		if strings.Contains(err.Error(), "datastore: no such entity") {
+			err = ErrDontLog{err}
+		}
 		return err
 	}
 	if err := checkAccessLevel(c, r, config.Namespaces[ns].AccessLevel); err != nil {
@@ -452,6 +481,22 @@ func handleTextImpl(c context.Context, w http.ResponseWriter, r *http.Request, t
 	// Unfortunately filename does not work in chrome on linux due to:
 	// https://bugs.chromium.org/p/chromium/issues/detail?id=608342
 	w.Header().Set("Content-Disposition", "inline; filename="+textFilename(tag))
+	augmentRepro(c, w, tag, bug, crash)
+	w.Write(data)
+	return nil
+}
+
+func augmentRepro(c context.Context, w http.ResponseWriter, tag string, bug *Bug, crash *Crash) {
+	if tag == textReproSyz || tag == textReproC {
+		// Users asked for the bug link in reproducers (in case you only saved the repro link).
+		if bug != nil {
+			prefix := "#"
+			if tag == textReproC {
+				prefix = "//"
+			}
+			fmt.Fprintf(w, "%v %v/bug?id=%v\n", prefix, appURL(c), bug.keyHash())
+		}
+	}
 	if tag == textReproSyz {
 		// Add link to documentation and repro opts for syzkaller reproducers.
 		w.Write([]byte(syzReproPrefix))
@@ -459,8 +504,6 @@ func handleTextImpl(c context.Context, w http.ResponseWriter, r *http.Request, t
 			fmt.Fprintf(w, "#%s\n", crash.ReproOpts)
 		}
 	}
-	w.Write(data)
-	return nil
 }
 
 func handleText(c context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -498,13 +541,15 @@ func textFilename(tag string) string {
 
 func fetchNamespaceBugs(c context.Context, accessLevel AccessLevel,
 	ns, manager string) ([]*uiBugGroup, int, error) {
-	var bugs []*Bug
-	query := db.NewQuery("Bug").
-		Filter("Namespace=", ns)
-	if manager != "" {
-		query = query.Filter("HappenedOn=", manager)
+	filter := func(query *db.Query) *db.Query {
+		query = query.Filter("Namespace=", ns)
+		if manager != "" {
+			query = query.Filter("HappenedOn=", manager)
+		}
+		return query
 	}
-	if _, err := query.GetAll(c, &bugs); err != nil {
+	bugs, err := loadAllBugs(c, filter)
+	if err != nil {
 		return nil, 0, err
 	}
 	state, err := loadReportingState(c)
@@ -592,14 +637,15 @@ func fetchNamespaceBugs(c context.Context, accessLevel AccessLevel,
 
 func fetchTerminalBugs(c context.Context, accessLevel AccessLevel,
 	ns, manager string, typ *TerminalBug) (*uiBugGroup, error) {
-	var bugs []*Bug
-	query := db.NewQuery("Bug").
-		Filter("Namespace=", ns).
-		Filter("Status=", typ.Status)
-	if manager != "" {
-		query = query.Filter("HappenedOn=", manager)
-	}
-	if _, err := query.GetAll(c, &bugs); err != nil {
+	bugs, err := loadAllBugs(c, func(query *db.Query) *db.Query {
+		query = query.Filter("Namespace=", ns).
+			Filter("Status=", typ.Status)
+		if manager != "" {
+			query = query.Filter("HappenedOn=", manager)
+		}
+		return query
+	})
+	if err != nil {
 		return nil, err
 	}
 	state, err := loadReportingState(c)
@@ -839,6 +885,30 @@ func loadCrashesForBug(c context.Context, bug *Bug) ([]*uiCrash, []byte, error) 
 	return results, sampleReport, nil
 }
 
+func loadFixBisectionsForBug(c context.Context, bug *Bug) ([]*uiCrash, error) {
+	bugKey := bug.key(c)
+	jobs, _, err := queryJobsForBug(c, bugKey, JobBisectFix)
+	if err != nil {
+		return nil, err
+	}
+	var results []*uiCrash
+	for _, job := range jobs {
+		crash, err := queryCrashForJob(c, job, bugKey)
+		if err != nil {
+			return nil, err
+		}
+		if crash == nil {
+			continue
+		}
+		build, err := loadBuild(c, bug.Namespace, job.BuildID)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, makeUICrash(crash, build))
+	}
+	return results, nil
+}
+
 func makeUICrash(crash *Crash, build *Build) *uiCrash {
 	ui := &uiCrash{
 		Manager:      crash.Manager,
@@ -909,7 +979,7 @@ func loadManagers(c context.Context, accessLevel AccessLevel, ns string) ([]*uiM
 	}
 	stats := make([]*ManagerStats, len(statsKeys))
 	if err := db.GetMulti(c, statsKeys, stats); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching manager stats: %v", err)
 	}
 	var fullStats []*ManagerStats
 	for _, mgr := range managers {

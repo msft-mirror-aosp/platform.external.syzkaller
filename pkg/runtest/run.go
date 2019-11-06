@@ -59,6 +59,7 @@ type Context struct {
 	LogFunc      func(text string)
 	Retries      int // max number of test retries to deal with flaky tests
 	Verbose      bool
+	Tests        string // prefix to match test file names
 }
 
 func (ctx *Context) log(msg string, args ...interface{}) {
@@ -170,6 +171,9 @@ func (ctx *Context) generatePrograms(progs chan *RunRequest) error {
 			continue
 		}
 		if strings.HasSuffix(file.Name(), ".swp") {
+			continue
+		}
+		if !strings.HasPrefix(file.Name(), ctx.Tests) {
 			continue
 		}
 		p, requires, results, err := ctx.parseProg(file.Name())
@@ -377,6 +381,9 @@ func (ctx *Context) createSyzTest(p *prog.Prog, sandbox string, threaded, cov bo
 	}
 	cfg.Flags |= ipc.FlagEnableNetReset
 	cfg.Flags |= ipc.FlagEnableCgroups
+	if ctx.Features[host.FeatureDevlinkPCI].Enabled {
+		cfg.Flags |= ipc.FlagEnableDevlinkPCI
+	}
 	req := &RunRequest{
 		P:      p,
 		Cfg:    cfg,
@@ -471,8 +478,10 @@ func checkResult(req *RunRequest) error {
 			if req.Cfg.Flags&ipc.FlagSignal != 0 {
 				// Signal is always deduplicated, so we may not get any signal
 				// on a second invocation of the same syscall.
+				// For calls that are not meant to collect synchronous coverage we
+				// allow the signal to be empty as long as the extra signal is not.
 				callName := req.P.Calls[i].Meta.CallName
-				if len(inf.Signal) < 2 && !calls[callName] {
+				if len(inf.Signal) < 2 && !calls[callName] && len(info.Extra.Signal) == 0 {
 					return fmt.Errorf("run %v: call %v: no signal", run, i)
 				}
 				if len(inf.Cover) == 0 {

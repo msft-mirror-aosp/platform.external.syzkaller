@@ -118,6 +118,7 @@ static bool flag_enable_net_dev;
 static bool flag_enable_net_reset;
 static bool flag_enable_cgroups;
 static bool flag_enable_close_fds;
+static bool flag_enable_devlink_pci;
 
 static bool flag_collect_cover;
 static bool flag_dedup_cover;
@@ -347,6 +348,14 @@ int main(int argc, char** argv)
 #endif
 		return 0;
 	}
+	if (argc >= 2 && strcmp(argv[1], "setup_kcsan_blacklist") == 0) {
+#if SYZ_HAVE_KCSAN
+		setup_kcsan_filterlist(argv + 2, argc - 2, /*blacklist=*/true);
+#else
+		fail("KCSAN is not implemented");
+#endif
+		return 0;
+	}
 	if (argc == 2 && strcmp(argv[1], "test") == 0)
 		return run_tests();
 
@@ -473,6 +482,7 @@ void parse_env_flags(uint64 flags)
 	flag_enable_net_reset = flags & (1 << 8);
 	flag_enable_cgroups = flags & (1 << 9);
 	flag_enable_close_fds = flags & (1 << 10);
+	flag_enable_devlink_pci = flags & (1 << 11);
 }
 
 #if SYZ_EXECUTOR_USES_FORK_SERVER
@@ -595,26 +605,6 @@ retry:
 		uint64 call_num = read_input(&input_pos);
 		if (call_num == instr_eof)
 			break;
-		bool call_extra_cover = false;
-		// call_extra_timeout must match timeout in pkg/csource/csource.go.
-		int call_extra_timeout = 0;
-		// TODO: find a way to tune timeout values.
-		if (strncmp(syscalls[call_num].name, "syz_usb", strlen("syz_usb")) == 0) {
-			prog_extra_cover = true;
-			call_extra_cover = true;
-		}
-		if (strncmp(syscalls[call_num].name, "syz_usb_connect", strlen("syz_usb_connect")) == 0) {
-			prog_extra_timeout = 2000;
-			call_extra_timeout = 2000;
-		}
-		if (strncmp(syscalls[call_num].name, "syz_usb_control_io", strlen("syz_usb_control_io")) == 0)
-			call_extra_timeout = 300;
-		if (strncmp(syscalls[call_num].name, "syz_usb_ep_write", strlen("syz_usb_ep_write")) == 0)
-			call_extra_timeout = 300;
-		if (strncmp(syscalls[call_num].name, "syz_usb_ep_read", strlen("syz_usb_ep_read")) == 0)
-			call_extra_timeout = 300;
-		if (strncmp(syscalls[call_num].name, "syz_usb_disconnect", strlen("syz_usb_disconnect")) == 0)
-			call_extra_timeout = 300;
 		if (call_num == instr_copyin) {
 			char* addr = (char*)read_input(&input_pos);
 			uint64 typ = read_input(&input_pos);
@@ -705,6 +695,28 @@ retry:
 		// Normal syscall.
 		if (call_num >= ARRAY_SIZE(syscalls))
 			fail("invalid command number %llu", call_num);
+		bool call_extra_cover = false;
+		// call_extra_timeout must match timeout in pkg/csource/csource.go.
+		int call_extra_timeout = 0;
+		// TODO: find a way to tune timeout values.
+		if (strncmp(syscalls[call_num].name, "syz_usb", strlen("syz_usb")) == 0) {
+			prog_extra_cover = true;
+			call_extra_cover = true;
+		}
+		if (strncmp(syscalls[call_num].name, "syz_usb_connect", strlen("syz_usb_connect")) == 0) {
+			prog_extra_timeout = 2000;
+			call_extra_timeout = 2000;
+		}
+		if (strncmp(syscalls[call_num].name, "syz_usb_control_io", strlen("syz_usb_control_io")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_usb_ep_write", strlen("syz_usb_ep_write")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_usb_ep_read", strlen("syz_usb_ep_read")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_usb_disconnect", strlen("syz_usb_disconnect")) == 0)
+			call_extra_timeout = 300;
+		if (strncmp(syscalls[call_num].name, "syz_open_dev$hiddev", strlen("syz_open_dev$hiddev")) == 0)
+			call_extra_timeout = 50;
 		uint64 copyout_index = read_input(&input_pos);
 		uint64 num_args = read_input(&input_pos);
 		if (num_args > kMaxArgs)

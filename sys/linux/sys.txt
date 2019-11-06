@@ -24,7 +24,6 @@ include <linux/fadvise.h>
 include <linux/falloc.h>
 include <linux/futex.h>
 include <linux/kexec.h>
-include <linux/seccomp.h>
 include <linux/elf.h>
 include <linux/fiemap.h>
 include <linux/kd.h>
@@ -51,6 +50,7 @@ include <linux/membarrier.h>
 include <uapi/linux/kcov.h>
 include <uapi/linux/membarrier.h>
 include <uapi/linux/capability.h>
+include <uapi/linux/seccomp.h>
 include <uapi/linux/suspend_ioctls.h>
 
 resource fd[int32]: -1
@@ -123,8 +123,7 @@ eventfd2(initval int32, flags flags[eventfd_flags]) fd_event
 read$eventfd(fd fd_event, val ptr[out, int64], len len[val])
 write$eventfd(fd fd_event, val ptr[in, int64], len len[val])
 
-# NEED: offset must be page-aligned. Or does the syscall even accept offset in pages?
-mmap(addr vma, len len[addr], prot flags[mmap_prot], flags flags[mmap_flags], fd fd, offset fileoff)
+mmap(addr vma, len len[addr], prot flags[mmap_prot], flags flags[mmap_flags], fd fd, offset int32[0:0xffffffff, 0x1000])
 munmap(addr vma, len len[addr])
 mremap(addr vma, len len[addr], newlen len[newaddr], flags flags[mremap_flags], newaddr vma)
 remap_file_pages(addr vma, size len[addr], prot flags[mmap_prot], pgoff intptr, flags flags[mmap_flags])
@@ -213,7 +212,6 @@ seccomp_metadata {
 
 capget(hdr ptr[in, cap_header], data ptr[in, cap_data])
 capset(hdr ptr[in, cap_header], data ptr[in, cap_data])
-seccomp(op flags[seccomp_op], flags flags[seccomp_flags], prog ptr[in, sock_fprog])
 
 resource fd_mq[fd]
 mq_open(name ptr[in, string], flags flags[mq_open_flags], mode flags[open_mode], attr ptr[in, mq_attr]) fd_mq
@@ -241,6 +239,19 @@ futimesat(dir fd_dir, pathname ptr[in, filename], times ptr[in, itimerval])
 utimensat(dir fd_dir, pathname ptr[in, filename], times ptr[in, itimerval], flags flags[utimensat_flags])
 
 clone(flags flags[clone_flags], sp buffer[in], parentid ptr[out, int32], childtid ptr[out, int32], tls buffer[in])
+clone3(args ptr[in, clone_args], size bytesize[args]) pid
+
+clone_args {
+	flags		flags[clone_flags, int64]
+	pidfd		ptr64[out, fd_pidfd]
+	child_tid	ptr64[out, pid]
+	parent_tid	ptr64[out, pid]
+	exit_signal	signalno
+	exit_signal_pad	const[0, int32]
+	stack		ptr64[out, array[int8]]
+	stack_size	bytesize[stack, int64]
+	tls		ptr64[out, array[int8]]
+}
 
 resource pid[int32]: 0, -1
 resource uid[int32]: 0, -1, 0xee00, 0xee01
@@ -369,6 +380,7 @@ setitimer(which flags[getitimer_which], new ptr[in, itimerval], old ptr[out, iti
 exit(code intptr)
 exit_group(code intptr)
 waitid(which flags[waitid_which], pid pid, infop ptr[out, siginfo, opt], options flags[wait_options], ru ptr[out, rusage, opt])
+waitid$P_PIDFD(which const[P_PIDFD], pidfd fd_pidfd, infop ptr[out, siginfo, opt], options flags[wait_options], ru ptr[out, rusage, opt])
 wait4(pid pid, status ptr[out, int32, opt], options flags[wait_options], ru ptr[out, rusage, opt])
 times(buf ptr[out, tms])
 # Can send signals to all processes (pid=-1).
@@ -431,6 +443,7 @@ resource fd_pidfd[fd]
 
 openat$pidfd(fd const[AT_FDCWD], file ptr[in, string["/proc/self"]], flags flags[open_flags], mode const[0]) fd_pidfd
 pidfd_send_signal(fd fd_pidfd, sig signalno, info ptr[in, siginfo], flags const[0])
+pidfd_open(pid pid, flags const[0]) fd_pidfd
 
 # Uncomment on your own account.
 #syz_open_dev$char(dev const[0xc], major intptr, minor intptr) fd
@@ -447,7 +460,6 @@ pidfd_send_signal(fd fd_pidfd, sig signalno, info ptr[in, siginfo], flags const[
 # TODO: all these devices returning just fd need proper interface descriptions.
 syz_open_dev$vcsn(dev ptr[in, string["/dev/vcs#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$vcsa(dev ptr[in, string["/dev/vcsa#"]], id intptr, flags flags[open_flags]) fd
-syz_open_dev$usbmon(dev ptr[in, string["/dev/usbmon#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$midi(dev ptr[in, string["/dev/midi#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$ircomm(dev ptr[in, string["/dev/ircomm#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$dspn(dev ptr[in, string["/dev/dsp#"]], id intptr, flags flags[open_flags]) fd
@@ -456,7 +468,6 @@ syz_open_dev$admmidi(dev ptr[in, string["/dev/admmidi#"]], id intptr, flags flag
 syz_open_dev$adsp(dev ptr[in, string["/dev/adsp#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$amidi(dev ptr[in, string["/dev/amidi#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$audion(dev ptr[in, string["/dev/audio#"]], id intptr, flags flags[open_flags]) fd
-syz_open_dev$usb(dev ptr[in, string["/dev/bus/usb/00#/00#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$sndhw(dev ptr[in, string["/dev/snd/hwC#D#"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$sndpcmc(dev ptr[in, string["/dev/snd/pcmC#D#c"]], id intptr, flags flags[open_flags]) fd
 syz_open_dev$sndpcmp(dev ptr[in, string["/dev/snd/pcmC#D#p"]], id intptr, flags flags[open_flags]) fd
@@ -840,7 +851,7 @@ kcmp_epoll_slot {
 
 open_flags = O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, FASYNC, O_CLOEXEC, O_CREAT, O_DIRECT, O_DIRECTORY, O_EXCL, O_LARGEFILE, O_NOATIME, O_NOCTTY, O_NOFOLLOW, O_NONBLOCK, O_PATH, O_SYNC, O_TRUNC, __O_TMPFILE
 open_mode = S_IRUSR, S_IWUSR, S_IXUSR, S_IRGRP, S_IWGRP, S_IXGRP, S_IROTH, S_IWOTH, S_IXOTH
-madvise_flags = MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED, MADV_DONTNEED, MADV_REMOVE, MADV_DONTFORK, MADV_DOFORK, MADV_HWPOISON, MADV_SOFT_OFFLINE, MADV_MERGEABLE, MADV_UNMERGEABLE, MADV_HUGEPAGE, MADV_NOHUGEPAGE, MADV_DONTDUMP, MADV_DODUMP, MADV_WIPEONFORK, MADV_KEEPONFORK
+madvise_flags = MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED, MADV_DONTNEED, MADV_REMOVE, MADV_DONTFORK, MADV_DOFORK, MADV_HWPOISON, MADV_SOFT_OFFLINE, MADV_MERGEABLE, MADV_UNMERGEABLE, MADV_HUGEPAGE, MADV_NOHUGEPAGE, MADV_DONTDUMP, MADV_DODUMP, MADV_WIPEONFORK, MADV_KEEPONFORK, MADV_COLD, MADV_PAGEOUT
 fadvise_flags = POSIX_FADV_NORMAL, POSIX_FADV_SEQUENTIAL, POSIX_FADV_RANDOM, POSIX_FADV_NOREUSE, POSIX_FADV_WILLNEED, POSIX_FADV_DONTNEED
 move_pages_flags = MPOL_MF_MOVE, MPOL_MF_MOVE_ALL
 msync_flags = MS_ASYNC, MS_SYNC, MS_INVALIDATE
@@ -872,8 +883,6 @@ linkat_flags = AT_EMPTY_PATH, AT_SYMLINK_FOLLOW
 unlinkat_flags = 0, AT_REMOVEDIR
 renameat2_flags = RENAME_EXCHANGE, RENAME_NOREPLACE, RENAME_WHITEOUT
 flock_op = LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB
-seccomp_op = SECCOMP_SET_MODE_STRICT, SECCOMP_SET_MODE_FILTER
-seccomp_flags = 0, SECCOMP_FILTER_FLAG_TSYNC
 statx_flags = AT_SYMLINK_NOFOLLOW, AT_SYMLINK_FOLLOW, AT_NO_AUTOMOUNT, AT_EMPTY_PATH, AT_STATX_SYNC_TYPE, AT_STATX_SYNC_AS_STAT, AT_STATX_FORCE_SYNC, AT_STATX_DONT_SYNC
 statx_mask = STATX_TYPE, STATX_MODE, STATX_NLINK, STATX_UID, STATX_GID, STATX_ATIME, STATX_MTIME, STATX_CTIME, STATX_INO, STATX_SIZE, STATX_BLOCKS, STATX_BASIC_STATS, STATX_BTIME, STATX_ALL
 name_to_handle_at_flags = AT_EMPTY_PATH, AT_SYMLINK_FOLLOW

@@ -31,30 +31,10 @@ func newLinux(dir string) *linux {
 }
 
 func (ctx *linux) PreviousReleaseTags(commit string) ([]string, error) {
-	return ctx.previousReleaseTags(commit, false)
-}
-
-func (ctx *linux) previousReleaseTags(commit string, self bool) ([]string, error) {
-	var tags []string
-	if self {
-		output, err := ctx.git.git("tag", "--list", "--points-at", commit, "--merged", commit, "v*.*")
-		if err != nil {
-			return nil, err
-		}
-		tags, err = gitParseReleaseTags(output)
-		if err != nil {
-			return nil, err
-		}
-	}
-	output, err := ctx.git.git("tag", "--no-contains", commit, "--merged", commit, "v*.*")
+	tags, err := ctx.git.previousReleaseTags(commit, false)
 	if err != nil {
 		return nil, err
 	}
-	tags1, err := gitParseReleaseTags(output)
-	if err != nil {
-		return nil, err
-	}
-	tags = append(tags, tags1...)
 	for i, tag := range tags {
 		if tag == "v4.0" {
 			// Initially we tried to stop at 3.8 because:
@@ -108,7 +88,7 @@ func gitReleaseTagToInt(tag string) uint64 {
 	return v1*1e6 + v2*1e3 + v3
 }
 
-func (ctx *linux) EnvForCommit(commit string, kernelConfig []byte) (*BisectEnv, error) {
+func (ctx *linux) EnvForCommit(binDir, commit string, kernelConfig []byte) (*BisectEnv, error) {
 	tagList, err := ctx.previousReleaseTags(commit, true)
 	if err != nil {
 		return nil, err
@@ -118,7 +98,7 @@ func (ctx *linux) EnvForCommit(commit string, kernelConfig []byte) (*BisectEnv, 
 		tags[tag] = true
 	}
 	env := &BisectEnv{
-		Compiler:     "gcc-" + linuxCompilerVersion(tags),
+		Compiler:     filepath.Join(binDir, "gcc-"+linuxCompilerVersion(tags), "bin", "gcc"),
 		KernelConfig: linuxDisableConfigs(kernelConfig, tags),
 	}
 	// v4.0 doesn't boot with our config nor with defconfig, it halts on an interrupt in x86_64_start_kernel.
