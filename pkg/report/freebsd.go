@@ -73,7 +73,7 @@ func (ctx *freebsd) Symbolize(rep *Report) error {
 
 var freebsdStackParams = &stackParams{}
 
-var freebsdOopses = []*oops{
+var freebsdOopses = append([]*oops{
 	{
 		[]byte("Fatal trap"),
 		[]oopsFormat{
@@ -112,7 +112,15 @@ var freebsdOopses = []*oops{
 				title: compile("panic: No chunks on the queues for sid [0-9]+\\.\\r?\\n"),
 				fmt:   "panic: sctp: no chunks on the queues",
 			},
+			{
+				title: compile("panic: size_on_all_streams = [0-9]+ smaller than control length [0-9]+\\r?\\n"),
+				fmt:   "panic: size_on_all_streams smaller than control length",
+			},
+			{
+				title: compile("panic: sbflush_internal: ccc [0-9]+ mb [0-9]+ mbcnt [0-9]+\\r?\\n"),
+				fmt:   "panic: sbflush_internal: residual data",
+			},
 		},
 		[]*regexp.Regexp{},
 	},
-}
+}, commonOopses...)

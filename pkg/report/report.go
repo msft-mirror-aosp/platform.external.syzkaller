@@ -62,6 +62,7 @@ const (
 	Unknown Type = iota
 	Hang
 	MemoryLeak
+	DataRace
 	UnexpectedReboot
 )
 
@@ -73,6 +74,8 @@ func (t Type) String() string {
 		return "HANG"
 	case MemoryLeak:
 		return "LEAK"
+	case DataRace:
+		return "DATARACE"
 	case UnexpectedReboot:
 		return "REBOOT"
 	default:
@@ -119,6 +122,7 @@ func NewReporter(cfg *mgrconfig.Config) (Reporter, error) {
 const (
 	unexpectedKernelReboot = "unexpected kernel reboot"
 	memoryLeakPrefix       = "memory leak in "
+	dataRacePrefix         = "KCSAN: data-race"
 )
 
 var ctors = map[string]fn{
@@ -186,6 +190,9 @@ func extractReportType(rep *Report) Type {
 	}
 	if strings.HasPrefix(rep.Title, memoryLeakPrefix) {
 		return MemoryLeak
+	}
+	if strings.HasPrefix(rep.Title, dataRacePrefix) {
+		return DataRace
 	}
 	if strings.HasPrefix(rep.Title, "INFO: rcu detected stall") ||
 		strings.HasPrefix(rep.Title, "INFO: task hung") ||
@@ -586,3 +593,22 @@ var (
 	filenameRe    = regexp.MustCompile(`[a-zA-Z0-9_\-\./]*[a-zA-Z0-9_\-]+\.(c|h):[0-9]+`)
 	reportFrameRe = regexp.MustCompile(`.* in ([a-zA-Z0-9_]+)`)
 )
+
+// These are produced by syzkaller itself.
+// But also catches crashes in Go programs in gvisor/fuchsia.
+var commonOopses = []*oops{
+	{
+		[]byte("panic:"),
+		[]oopsFormat{
+			{
+				title:        compile("panic:(.*)"),
+				fmt:          "panic:%[1]v",
+				noStackTrace: true,
+			},
+		},
+		[]*regexp.Regexp{
+			// This can match some kernel functions (skb_panic, skb_over_panic).
+			compile("_panic:"),
+		},
+	},
+}

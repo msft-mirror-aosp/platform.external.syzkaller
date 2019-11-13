@@ -395,6 +395,8 @@ func init() {
 	checkFeature[FeatureLeakChecking] = checkLeakChecking
 	checkFeature[FeatureNetworkInjection] = checkNetworkInjection
 	checkFeature[FeatureNetworkDevices] = unconditionallyEnabled
+	checkFeature[FeatureKCSAN] = checkKCSAN
+	checkFeature[FeatureDevlinkPCI] = checkDevlinkPCI
 }
 
 func checkCoverage() string {
@@ -544,7 +546,7 @@ func checkNetworkInjection() string {
 }
 
 func checkUSBInjection() string {
-	if err := osutil.IsAccessible("/sys/kernel/debug/usb-fuzzer"); err != nil {
+	if err := osutil.IsAccessible("/sys/kernel/debug/usb/raw-gadget"); err != nil {
 		return err.Error()
 	}
 	return ""
@@ -553,6 +555,20 @@ func checkUSBInjection() string {
 func checkDebugFS() string {
 	if err := osutil.IsAccessible("/sys/kernel/debug"); err != nil {
 		return "debugfs is not enabled or not mounted"
+	}
+	return ""
+}
+
+func checkKCSAN() string {
+	if err := osutil.IsAccessible("/sys/kernel/debug/kcsan"); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func checkDevlinkPCI() string {
+	if err := osutil.IsAccessible("/sys/bus/pci/devices/0000:00:10.0/"); err != nil {
+		return "PCI device 0000:00:10.0 is not available"
 	}
 	return ""
 }

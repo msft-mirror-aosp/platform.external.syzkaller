@@ -134,7 +134,7 @@ func (ctx *mutator) insertCall() bool {
 		c = p.Calls[idx]
 	}
 	s := analyze(ctx.ct, ctx.corpus, p, c)
-	calls := r.generateCall(s, p)
+	calls := r.generateCall(s, p, idx)
 	// TODO: the program might have more than ncalls
 	p.insertBefore(c, calls)
 	return true
@@ -254,24 +254,50 @@ func regenerate(r *randGen, s *state, arg Arg) (calls []*Call, retry, preserve b
 	return
 }
 
-func mutateInt(r *randGen, s *state, arg Arg) (calls []*Call, retry, preserve bool) {
+func mutateInt(r *randGen, a *ConstArg, t *IntType) uint64 {
+	switch {
+	case r.nOutOf(1, 3):
+		return a.Val + (uint64(r.Intn(4)) + 1)
+	case r.nOutOf(1, 2):
+		return a.Val - (uint64(r.Intn(4)) + 1)
+	default:
+		return a.Val ^ (1 << uint64(r.Intn(int(t.TypeBitSize()))))
+	}
+}
+
+func mutateAlignedInt(r *randGen, a *ConstArg, t *IntType) uint64 {
+	rangeEnd := t.RangeEnd
+	if t.RangeBegin == 0 && int64(rangeEnd) == -1 {
+		// Special [0:-1] range for all possible values.
+		rangeEnd = uint64(1<<t.TypeBitSize() - 1)
+	}
+	index := (a.Val - t.RangeBegin) / t.Align
+	misalignment := (a.Val - t.RangeBegin) % t.Align
+	switch {
+	case r.nOutOf(1, 3):
+		index += uint64(r.Intn(4)) + 1
+	case r.nOutOf(1, 2):
+		index -= uint64(r.Intn(4)) + 1
+	default:
+		index ^= 1 << uint64(r.Intn(int(t.TypeBitSize())))
+	}
+	lastIndex := (rangeEnd - t.RangeBegin) / t.Align
+	index %= lastIndex + 1
+	return t.RangeBegin + index*t.Align + misalignment
+}
+
+func (t *IntType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool) {
 	if r.bin() {
 		return regenerate(r, s, arg)
 	}
 	a := arg.(*ConstArg)
-	switch {
-	case r.nOutOf(1, 3):
-		a.Val += uint64(r.Intn(4)) + 1
-	case r.nOutOf(1, 2):
-		a.Val -= uint64(r.Intn(4)) + 1
-	default:
-		a.Val ^= 1 << uint64(r.Intn(64))
+	if t.Align == 0 {
+		a.Val = mutateInt(r, a, t)
+	} else {
+		a.Val = mutateAlignedInt(r, a, t)
 	}
+	a.Val = truncateToBitSize(a.Val, t.TypeBitSize())
 	return
-}
-
-func (t *IntType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool) {
-	return mutateInt(r, s, arg)
 }
 
 func (t *FlagsType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool) {
@@ -304,19 +330,22 @@ func (t *ProcType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*C
 }
 
 func (t *BufferType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool) {
+	minLen, maxLen := uint64(0), maxBlobLen
+	if t.Kind == BufferBlobRange {
+		minLen, maxLen = t.RangeBegin, t.RangeEnd
+	}
 	a := arg.(*DataArg)
+	if t.Dir() == DirOut {
+		mutateBufferSize(r, a, minLen, maxLen)
+		return
+	}
 	switch t.Kind {
 	case BufferBlobRand, BufferBlobRange:
 		data := append([]byte{}, a.Data()...)
-		minLen, maxLen := uint64(0), maxBlobLen
-		if t.Kind == BufferBlobRange {
-			minLen, maxLen = t.RangeBegin, t.RangeEnd
-		}
 		a.data = mutateData(r, data, minLen, maxLen)
 	case BufferString:
 		data := append([]byte{}, a.Data()...)
 		if r.bin() {
-			minLen, maxLen := uint64(0), maxBlobLen
 			if t.TypeSize != 0 {
 				minLen, maxLen = t.TypeSize, t.TypeSize
 			}
@@ -333,6 +362,18 @@ func (t *BufferType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []
 		panic("unknown buffer kind")
 	}
 	return
+}
+
+func mutateBufferSize(r *randGen, arg *DataArg, minLen, maxLen uint64) {
+	for oldSize := arg.Size(); oldSize == arg.Size(); {
+		arg.size += uint64(r.Intn(33)) - 16
+		if arg.size < minLen {
+			arg.size = minLen
+		}
+		if arg.size > maxLen {
+			arg.size = maxLen
+		}
+	}
 }
 
 func (t *ArrayType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool) {
@@ -462,7 +503,9 @@ func (ma *mutationArgs) collectArg(arg Arg, ctx *ArgCtx) {
 		return
 	}
 
-	if typ.Dir() == DirOut || !typ.Varlen() && typ.Size() == 0 {
+	_, isArrayTyp := typ.(*ArrayType)
+	_, isBufferTyp := typ.(*BufferType)
+	if !isBufferTyp && !isArrayTyp && typ.Dir() == DirOut || !typ.Varlen() && typ.Size() == 0 {
 		return
 	}
 
@@ -477,12 +520,21 @@ func (ma *mutationArgs) collectArg(arg Arg, ctx *ArgCtx) {
 func (t *IntType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	// For a integer without a range of values, the priority is based on
 	// the number of bits occupied by the underlying type.
-	plainPrio := math.Log2((float64(t.Size() * 8))) + 0.1*maxPriority
+	plainPrio := math.Log2(float64(t.TypeBitSize())) + 0.1*maxPriority
 	if t.Kind != IntRange {
 		return plainPrio, false
 	}
 
-	switch size := t.RangeEnd - t.RangeBegin + 1; {
+	size := t.RangeEnd - t.RangeBegin + 1
+	if t.Align != 0 {
+		if t.RangeBegin == 0 && int64(t.RangeEnd) == -1 {
+			// Special [0:-1] range for all possible values.
+			size = (1<<t.TypeBitSize()-1)/t.Align + 1
+		} else {
+			size = (t.RangeEnd-t.RangeBegin)/t.Align + 1
+		}
+	}
+	switch {
 	case size <= 15:
 		// For a small range, we assume that it is effectively
 		// similar with FlagsType and we need to try all possible values.
@@ -575,6 +627,9 @@ func (t *LenType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (
 }
 
 func (t *BufferType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
+	if t.Dir() == DirOut && !t.Varlen() {
+		return dontMutate, false
+	}
 	return 0.8 * maxPriority, false
 }
 
@@ -706,7 +761,7 @@ var mutateDataFuncs = [...]func(r *randGen, data []byte, minLen, maxLen uint64) 
 			return data, false
 		}
 		i := r.Intn(len(data) - width + 1)
-		value := r.randInt()
+		value := r.randInt64()
 		if r.oneOf(10) {
 			value = swap64(value)
 		}

@@ -55,24 +55,44 @@ func (r *randGen) rand64() uint64 {
 	return v
 }
 
-// Some potentially interesting integers.
-var specialInts = []uint64{
-	0, 1, 31, 32, 63, 64, 127, 128,
-	129, 255, 256, 257, 511, 512,
-	1023, 1024, 1025, 2047, 2048, 4095, 4096,
-	(1 << 15) - 1, (1 << 15), (1 << 15) + 1,
-	(1 << 16) - 1, (1 << 16), (1 << 16) + 1,
-	(1 << 31) - 1, (1 << 31), (1 << 31) + 1,
-	(1 << 32) - 1, (1 << 32), (1 << 32) + 1,
+var (
+	// Some potentially interesting integers.
+	specialInts = []uint64{
+		0, 1, 31, 32, 63, 64, 127, 128,
+		129, 255, 256, 257, 511, 512,
+		1023, 1024, 1025, 2047, 2048, 4095, 4096,
+		(1 << 15) - 1, (1 << 15), (1 << 15) + 1,
+		(1 << 16) - 1, (1 << 16), (1 << 16) + 1,
+		(1 << 31) - 1, (1 << 31), (1 << 31) + 1,
+		(1 << 32) - 1, (1 << 32), (1 << 32) + 1,
+	}
+	// The indexes (exclusive) for the maximum specialInts values that fit in 1, 2, ... 8 bytes.
+	specialIntIndex [9]int
+)
+
+func init() {
+	sort.Slice(specialInts, func(i, j int) bool {
+		return specialInts[i] < specialInts[j]
+	})
+	for i := range specialIntIndex {
+		bitSize := uint64(8 * i)
+		specialIntIndex[i] = sort.Search(len(specialInts), func(i int) bool {
+			return specialInts[i]>>bitSize != 0
+		})
+	}
 }
 
-func (r *randGen) randInt() uint64 {
+func (r *randGen) randInt64() uint64 {
+	return r.randInt(64)
+}
+
+func (r *randGen) randInt(bits uint64) uint64 {
 	v := r.rand64()
 	switch {
 	case r.nOutOf(100, 182):
 		v %= 10
-	case r.nOutOf(50, 82):
-		v = specialInts[r.Intn(len(specialInts))]
+	case bits >= 8 && r.nOutOf(50, 82):
+		v = specialInts[r.Intn(specialIntIndex[bits/8])]
 	case r.nOutOf(10, 32):
 		v %= 256
 	case r.nOutOf(10, 22):
@@ -87,14 +107,29 @@ func (r *randGen) randInt() uint64 {
 	case r.nOutOf(5, 7):
 		v = uint64(-int64(v))
 	default:
-		v <<= uint(r.Intn(63))
+		v <<= uint(r.Intn(int(bits)))
 	}
-	return v
+	return truncateToBitSize(v, bits)
 }
 
-func (r *randGen) randRangeInt(begin uint64, end uint64) uint64 {
+func truncateToBitSize(v, bitSize uint64) uint64 {
+	if bitSize == 0 || bitSize > 64 {
+		panic(fmt.Sprintf("invalid bitSize value: %d", bitSize))
+	}
+	return v & uint64(1<<bitSize-1)
+}
+
+func (r *randGen) randRangeInt(begin, end, bitSize, align uint64) uint64 {
 	if r.oneOf(100) {
-		return r.randInt()
+		return r.randInt(bitSize)
+	}
+	if align != 0 {
+		if begin == 0 && int64(end) == -1 {
+			// Special [0:-1] range for all possible values.
+			end = uint64(1<<bitSize - 1)
+		}
+		endAlign := (end - begin) / align
+		return begin + r.randRangeInt(0, endAlign, bitSize, 0)*align
 	}
 	return begin + (r.Uint64() % (end - begin + 1))
 }
@@ -463,14 +498,17 @@ func (r *randGen) nOutOf(n, outOf int) bool {
 	return v < n
 }
 
-func (r *randGen) generateCall(s *state, p *Prog) []*Call {
+func (r *randGen) generateCall(s *state, p *Prog, insertionPoint int) []*Call {
 	idx := 0
 	if s.ct == nil {
 		idx = r.Intn(len(r.target.Syscalls))
+	} else if insertionPoint <= 0 {
+		idx = s.ct.enabledCalls[r.Intn(len(s.ct.enabledCalls))].ID
 	} else {
 		call := -1
 		if len(p.Calls) != 0 {
-			call = p.Calls[r.Intn(len(p.Calls))].Meta.ID
+			// Choosing the base call is based on the insertion point of the new calls sequence.
+			call = p.Calls[r.Intn(insertionPoint)].Meta.ID
 		}
 		idx = s.ct.Choose(r.Rand, call)
 	}
@@ -710,19 +748,11 @@ func (a *ConstType) generate(r *randGen, s *state) (arg Arg, calls []*Call) {
 }
 
 func (a *IntType) generate(r *randGen, s *state) (arg Arg, calls []*Call) {
-	v := r.randInt()
+	bits := a.TypeBitSize()
+	v := r.randInt(bits)
 	switch a.Kind {
-	case IntFileoff:
-		switch {
-		case r.nOutOf(90, 101):
-			v = 0
-		case r.nOutOf(10, 11):
-			v = r.rand(100)
-		default:
-			v = r.randInt()
-		}
 	case IntRange:
-		v = r.randRangeInt(a.RangeBegin, a.RangeEnd)
+		v = r.randRangeInt(a.RangeBegin, a.RangeEnd, bits, a.Align)
 	}
 	return MakeConstArg(a, v), nil
 }

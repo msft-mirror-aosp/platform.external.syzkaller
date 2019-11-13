@@ -46,7 +46,10 @@ func ctorOpenbsd(cfg *config) (Reporter, []string, error) {
 		kernelObject: kernelObject,
 		symbols:      symbols,
 	}
-	return ctx, nil, nil
+	suppressions := []string{
+		"panic: fifo_badop called",
+	}
+	return ctx, suppressions, nil
 }
 
 func (ctx *openbsd) ContainsCrash(output []byte) bool {
@@ -133,7 +136,7 @@ func (ctx *openbsd) symbolizeLine(symbFunc func(bin string, pc uint64) ([]symbol
 	return symbolized
 }
 
-var openbsdOopses = []*oops{
+var openbsdOopses = append([]*oops{
 	{
 		[]byte("cleaned vnode"),
 		[]oopsFormat{
@@ -152,6 +155,14 @@ var openbsdOopses = []*oops{
 				fmt:   "assert %[1]v failed in %[2]v",
 			},
 			{
+				title: compile("panic: Data modified on freelist: .* previous type ([^ ]+)"),
+				fmt:   "malloc: free list modified: %[1]v",
+			},
+			{
+				title: compile("panic: pool_cache_item_magic_check: ([^ ]+) cpu free list modified"),
+				fmt:   "pool: cpu free list modified: %[1]v",
+			},
+			{
 				title: compile("panic: pool_do_put: ([^:]+): double pool_put"),
 				fmt:   "pool: double put: %[1]v",
 			},
@@ -162,6 +173,10 @@ var openbsdOopses = []*oops{
 			{
 				title: compile("panic: timeout_add: to_ticks \\(.+\\) < 0"),
 				fmt:   "panic: timeout_add: to_ticks < 0",
+			},
+			{
+				title: compile("panic: attempt to execute user address {{ADDR}} in supervisor mode"),
+				fmt:   "panic: attempt to execute user address",
 			},
 		},
 		[]*regexp.Regexp{},
@@ -198,6 +213,10 @@ var openbsdOopses = []*oops{
 		[]byte("uvm_fault"),
 		[]oopsFormat{
 			{
+				title: compile("uvm_fault\\((?:.*\\n)+?.*Stopped at[ ]+{{ADDR}}"),
+				fmt:   "uvm_fault",
+			},
+			{
 				title: compile("uvm_fault\\((?:.*\\n)+?.*Stopped at[ ]+([^\\+]+)"),
 				fmt:   "uvm_fault: %[1]v",
 			},
@@ -216,4 +235,4 @@ var openbsdOopses = []*oops{
 			compile("reorder_kernel"),
 		},
 	},
-}
+}, commonOopses...)

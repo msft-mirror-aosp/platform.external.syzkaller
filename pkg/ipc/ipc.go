@@ -37,6 +37,7 @@ const (
 	FlagEnableNetReset                                  // reset network namespace between programs
 	FlagEnableCgroups                                   // setup cgroups for testing
 	FlagEnableCloseFds                                  // close fds after each program
+	FlagEnableDevlinkPCI                                // setup devlink PCI device
 	// Executor does not know about these:
 	FlagUseShmem      // use shared memory instead of pipes for communication
 	FlagUseForkServer // use extended protocol with handshake
@@ -584,9 +585,6 @@ func makeCommand(pid int, bin []string, config *Config, inFile, outFile *os.File
 	if config.Flags&FlagDebug != 0 {
 		close(c.readDone)
 		cmd.Stderr = os.Stdout
-	} else if config.Flags&FlagUseForkServer == 0 {
-		close(c.readDone)
-		// TODO: read out output after execution failure.
 	} else {
 		cmd.Stderr = wp
 		go func(c *command) {

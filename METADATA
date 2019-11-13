@@ -5,10 +5,10 @@ third_party {
     type: GIT
     value: "https://github.com/google/syzkaller"
   }
-  version: "a60cb4cd840ce786236a00480e8bb1025e0c5fef"
+  version: "d797d2018f9550530c469ce03b5ae36cfa1ebd23"
   last_upgrade_date {
     year: 2019
-    month: 9
+    month: 11
     day: 6
   }
 }

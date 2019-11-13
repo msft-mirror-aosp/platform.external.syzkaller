@@ -64,7 +64,7 @@ type Bisecter interface {
 	// PreviousReleaseTags returns list of preceding release tags that are reachable from the given commit.
 	PreviousReleaseTags(commit string) ([]string, error)
 
-	EnvForCommit(commit string, kernelConfig []byte) (*BisectEnv, error)
+	EnvForCommit(binDir, commit string, kernelConfig []byte) (*BisectEnv, error)
 }
 
 type Commit struct {
@@ -104,6 +104,8 @@ func NewRepo(os, vm, dir string) (Repo, error) {
 		return newNetBSD(vm, dir), nil
 	case "freebsd":
 		return newFreeBSD(vm, dir), nil
+	case "test":
+		return newTestos(dir), nil
 	}
 	return nil, fmt.Errorf("vcs is unsupported for %v", os)
 }

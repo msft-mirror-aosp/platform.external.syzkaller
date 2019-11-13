@@ -194,6 +194,7 @@ LOCK_EX = 2
 LOCK_NB = 4
 LOCK_SH = 1
 LOCK_UN = 8
+MADV_COLD = 20
 MADV_DODUMP = 17
 MADV_DOFORK = 11
 MADV_DONTDUMP = 16
@@ -205,6 +206,7 @@ MADV_KEEPONFORK = 19
 MADV_MERGEABLE = 12
 MADV_NOHUGEPAGE = 15
 MADV_NORMAL = 0
+MADV_PAGEOUT = 21
 MADV_RANDOM = 1
 MADV_REMOVE = 9
 MADV_SEQUENTIAL = 2
@@ -391,6 +393,7 @@ PTRACE_TRACEME = 0
 P_ALL = 0
 P_PGID = 2
 P_PID = 1
+P_PIDFD = 3
 READ_IMPLIES_EXEC = 4194304
 RENAME_EXCHANGE = 2
 RENAME_NOREPLACE = 1
@@ -437,9 +440,6 @@ SCHED_FLAG_RESET_ON_FORK = 1
 SCHED_IDLE = 5
 SCHED_NORMAL = 0
 SCHED_RR = 2
-SECCOMP_FILTER_FLAG_TSYNC = 1
-SECCOMP_SET_MODE_FILTER = 1
-SECCOMP_SET_MODE_STRICT = 0
 SEEK_CUR = 1
 SEEK_DATA = 3
 SEEK_END = 2
@@ -554,6 +554,7 @@ __NR_clock_gettime = 113
 __NR_clock_nanosleep = 115
 __NR_clock_settime = 112
 __NR_clone = 220
+__NR_clone3 = 435
 __NR_close = 57
 # __NR_creat is not set
 __NR_delete_module = 106
@@ -659,6 +660,7 @@ __NR_open_by_handle_at = 265
 __NR_openat = 56
 # __NR_pause is not set
 __NR_personality = 92
+__NR_pidfd_open = 434
 __NR_pidfd_send_signal = 424
 # __NR_pipe is not set
 __NR_pipe2 = 59
@@ -708,7 +710,6 @@ __NR_sched_setattr = 274
 __NR_sched_setparam = 118
 __NR_sched_setscheduler = 119
 __NR_sched_yield = 124
-__NR_seccomp = 277
 # __NR_select is not set
 __NR_sendfile = 71
 # __NR_sendfile64 is not set

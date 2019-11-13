@@ -106,7 +106,7 @@ static bool write_file(const char* file, const char* what, ...)
 }
 #endif
 
-#if SYZ_EXECUTOR || SYZ_ENABLE_NETDEV || SYZ_TUN_ENABLE
+#if SYZ_EXECUTOR || SYZ_ENABLE_NETDEV || SYZ_TUN_ENABLE || SYZ_ENABLE_DEVLINK_PCI
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -165,7 +165,7 @@ static void netlink_done(void)
 }
 #endif
 
-static int netlink_send(int sock)
+static int netlink_send_ext(int sock, uint16 reply_type, int* reply_len)
 {
 	if (nlmsg.pos > nlmsg.buf + sizeof(nlmsg.buf) || nlmsg.nesting)
 		fail("nlmsg overflow/bad nesting");
@@ -178,11 +178,22 @@ static int netlink_send(int sock)
 	if (n != hdr->nlmsg_len)
 		fail("short netlink write: %d/%d", n, hdr->nlmsg_len);
 	n = recv(sock, nlmsg.buf, sizeof(nlmsg.buf), 0);
+	if (n < sizeof(struct nlmsghdr))
+		fail("short netlink read: %d", n);
+	if (reply_len && hdr->nlmsg_type == reply_type) {
+		*reply_len = n;
+		return 0;
+	}
 	if (n < sizeof(struct nlmsghdr) + sizeof(struct nlmsgerr))
 		fail("short netlink read: %d", n);
 	if (hdr->nlmsg_type != NLMSG_ERROR)
 		fail("short netlink ack: %d", hdr->nlmsg_type);
 	return -((struct nlmsgerr*)(hdr + 1))->error;
+}
+
+static int netlink_send(int sock)
+{
+	return netlink_send_ext(sock, 0, NULL);
 }
 
 #if SYZ_EXECUTOR || SYZ_ENABLE_NETDEV
@@ -238,6 +249,7 @@ static void netlink_add_hsr(int sock, const char* name, const char* slave1, cons
 }
 #endif
 
+#if SYZ_EXECUTOR || SYZ_ENABLE_NETDEV || SYZ_TUN_ENABLE
 static void netlink_device_change(int sock, const char* name, bool up,
 				  const char* master, const void* mac, int macsize)
 {
@@ -289,6 +301,7 @@ static void netlink_add_addr6(int sock, const char* dev, const char* addr)
 	debug("netlink: add addr %s dev %s: %s\n", addr, dev, strerror(err));
 	(void)err;
 }
+#endif
 
 #if SYZ_EXECUTOR || SYZ_TUN_ENABLE
 static void netlink_add_neigh(int sock, const char* name,
@@ -422,6 +435,83 @@ static void initialize_tun(void)
 }
 #endif
 
+#if SYZ_EXECUTOR || __NR_syz_init_net_socket || SYZ_ENABLE_DEVLINK_PCI
+const int kInitNetNsFd = 239; // see kMaxFd
+#endif
+
+#if SYZ_EXECUTOR || SYZ_ENABLE_DEVLINK_PCI
+
+#include <linux/genetlink.h>
+
+#define DEVLINK_FAMILY_NAME "devlink"
+
+#define DEVLINK_CMD_RELOAD 37
+#define DEVLINK_ATTR_BUS_NAME 1
+#define DEVLINK_ATTR_DEV_NAME 2
+#define DEVLINK_ATTR_NETNS_FD 137
+
+static void netlink_devlink_netns_move(const char* bus_name, const char* dev_name, int netns_fd)
+{
+	struct genlmsghdr genlhdr;
+	struct nlattr* attr;
+	int sock, err, n;
+	uint16 id = 0;
+
+	sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+	if (sock == -1)
+		fail("socket(AF_NETLINK) failed\n");
+	memset(&genlhdr, 0, sizeof(genlhdr));
+	genlhdr.cmd = CTRL_CMD_GETFAMILY;
+	netlink_init(GENL_ID_CTRL, 0, &genlhdr, sizeof(genlhdr));
+	netlink_attr(CTRL_ATTR_FAMILY_NAME, DEVLINK_FAMILY_NAME, strlen(DEVLINK_FAMILY_NAME) + 1);
+	err = netlink_send_ext(sock, GENL_ID_CTRL, &n);
+	if (err) {
+		debug("netlink: failed to get devlink family id: %s\n", strerror(err));
+		goto error;
+	}
+	attr = (struct nlattr*)(nlmsg.buf + NLMSG_HDRLEN + NLMSG_ALIGN(sizeof(genlhdr)));
+	for (; (char*)attr < nlmsg.buf + n; attr = (struct nlattr*)((char*)attr + NLMSG_ALIGN(attr->nla_len))) {
+		if (attr->nla_type == CTRL_ATTR_FAMILY_ID) {
+			id = *(uint16*)(attr + 1);
+			break;
+		}
+	}
+	if (!id) {
+		debug("netlink: failed to parse message for devlink family id\n");
+		goto error;
+	}
+	recv(sock, nlmsg.buf, sizeof(nlmsg.buf), 0); /* recv ack */
+	memset(&genlhdr, 0, sizeof(genlhdr));
+	genlhdr.cmd = DEVLINK_CMD_RELOAD;
+	netlink_init(id, 0, &genlhdr, sizeof(genlhdr));
+	netlink_attr(DEVLINK_ATTR_BUS_NAME, bus_name, strlen(bus_name) + 1);
+	netlink_attr(DEVLINK_ATTR_DEV_NAME, dev_name, strlen(dev_name) + 1);
+	netlink_attr(DEVLINK_ATTR_NETNS_FD, &netns_fd, sizeof(netns_fd));
+	netlink_send(sock);
+error:
+	close(sock);
+}
+
+static void initialize_devlink_pci(void)
+{
+#if SYZ_EXECUTOR
+	if (!flag_enable_devlink_pci)
+		return;
+#endif
+	int netns = open("/proc/self/ns/net", O_RDONLY);
+	if (netns == -1)
+		fail("open(/proc/self/ns/net) failed");
+	int ret = setns(kInitNetNsFd, 0);
+	if (ret == -1)
+		fail("set_ns(init_netns_fd) failed");
+	netlink_devlink_netns_move("pci", "0000:00:10.0", netns);
+	ret = setns(netns, 0);
+	if (ret == -1)
+		fail("set_ns(this_netns_fd) failed");
+	close(netns);
+}
+#endif
+
 #if SYZ_EXECUTOR || SYZ_ENABLE_NETDEV
 #include <arpa/inet.h>
 #include <errno.h>
@@ -443,6 +533,14 @@ static void initialize_tun(void)
 #define DEV_IPV4 "172.20.20.%d"
 #define DEV_IPV6 "fe80::%02x"
 #define DEV_MAC 0x00aaaaaaaaaa
+
+static void netdevsim_add(unsigned int addr, unsigned int port_count)
+{
+	char buf[16];
+
+	sprintf(buf, "%u %u", addr, port_count);
+	write_file("/sys/bus/netdevsim/new_device", buf);
+}
 
 // We test in a separate namespace, which does not have any network devices initially (even lo).
 // Create/up as many as we can.
@@ -489,7 +587,7 @@ static void initialize_netdevices(void)
 	    {"nlmon", "nlmon0"},
 	    {"caif", "caif0"},
 	    {"batadv", "batadv0"},
-	    // Note: adding device vxcan0 fails.
+	    // Note: this adds vxcan0/vxcan1 pair, similar to veth (creating vxcan0 would fail).
 	    {"vxcan", "vxcan1"},
 	    // Note: netdevsim devices can't have the same name even in different namespaces.
 	    {"netdevsim", netdevsim},
@@ -531,6 +629,7 @@ static void initialize_netdevices(void)
 	    {"hsr0", 0},
 	    {"dummy0", ETH_ALEN},
 	    {"nlmon0", 0},
+	    {"vxcan0", 0, true},
 	    {"vxcan1", 0, true},
 	    {"caif0", ETH_ALEN}, // TODO: up'ing caif fails with ENODEV
 	    {"batadv0", ETH_ALEN},
@@ -569,6 +668,8 @@ static void initialize_netdevices(void)
 	netlink_add_hsr(sock, "hsr0", "hsr_slave_0", "hsr_slave_1");
 	netlink_device_change(sock, "hsr_slave_0", true, 0, 0, 0);
 	netlink_device_change(sock, "hsr_slave_1", true, 0, 0, 0);
+
+	netdevsim_add((int)procid, 4); // Number of port is in sync with value in sys/linux/socket_netlink_generic_devlink.txt
 
 	for (i = 0; i < sizeof(devices) / (sizeof(devices[0])); i++) {
 		// Assign some unique address to devices. Some devices won't up without this.
@@ -799,6 +900,10 @@ static long syz_extract_tcp_res(volatile long a0, volatile long a1, volatile lon
 }
 #endif
 
+#if SYZ_EXECUTOR || SYZ_ENABLE_CLOSE_FDS || __NR_syz_usb_connect
+#define MAX_FDS 30
+#endif
+
 #if SYZ_EXECUTOR || __NR_syz_usb_connect
 #include <errno.h>
 #include <fcntl.h>
@@ -895,7 +1000,6 @@ static long syz_open_pts(volatile long a0, volatile long a1)
 #include <sys/types.h>
 #include <unistd.h>
 
-const int kInitNetNsFd = 239; // see kMaxFd
 // syz_init_net_socket opens a socket in init net namespace.
 // Used for families that can only be created in init net namespace.
 static long syz_init_net_socket(volatile long domain, volatile long type, volatile long proto)
@@ -1897,7 +2001,7 @@ static void sandbox_common()
 	setpgrp();
 	setsid();
 
-#if SYZ_EXECUTOR || __NR_syz_init_net_socket
+#if SYZ_EXECUTOR || __NR_syz_init_net_socket || SYZ_ENABLE_DEVLINK_PCI
 	int netns = open("/proc/self/ns/net", O_RDONLY);
 	if (netns == -1)
 		fail("open(/proc/self/ns/net) failed");
@@ -2035,6 +2139,9 @@ static int do_sandbox_none(void)
 	if (unshare(CLONE_NEWNET)) {
 		debug("unshare(CLONE_NEWNET): %d\n", errno);
 	}
+#if SYZ_EXECUTOR || SYZ_ENABLE_DEVLINK_PCI
+	initialize_devlink_pci();
+#endif
 #if SYZ_EXECUTOR || SYZ_TUN_ENABLE
 	initialize_tun();
 #endif
@@ -2069,6 +2176,9 @@ static int do_sandbox_setuid(void)
 	if (unshare(CLONE_NEWNET)) {
 		debug("unshare(CLONE_NEWNET): %d\n", errno);
 	}
+#if SYZ_EXECUTOR || SYZ_ENABLE_DEVLINK_PCI
+	initialize_devlink_pci();
+#endif
 #if SYZ_EXECUTOR || SYZ_TUN_ENABLE
 	initialize_tun();
 #endif
@@ -2121,6 +2231,9 @@ static int namespace_sandbox_proc(void* arg)
 	// because we want the tun device in the test namespace.
 	if (unshare(CLONE_NEWNET))
 		fail("unshare(CLONE_NEWNET)");
+#if SYZ_EXECUTOR || SYZ_ENABLE_DEVLINK_PCI
+	initialize_devlink_pci();
+#endif
 #if SYZ_EXECUTOR || SYZ_TUN_ENABLE
 	// We setup tun here as it needs to be in the test net namespace,
 	// which in turn needs to be in the test user namespace.
@@ -2630,7 +2743,7 @@ static void close_fds()
 	// Also close all USB emulation descriptors to trigger exit from USB
 	// event loop to collect coverage.
 	int fd;
-	for (fd = 3; fd < 30; fd++)
+	for (fd = 3; fd < MAX_FDS; fd++)
 		close(fd);
 }
 #endif
@@ -2777,4 +2890,36 @@ static void setup_binfmt_misc()
 	write_file("/proc/sys/fs/binfmt_misc/register", ":syz0:M:0:\x01::./file0:");
 	write_file("/proc/sys/fs/binfmt_misc/register", ":syz1:M:1:\x02::./file0:POC");
 }
+#endif
+
+#if SYZ_EXECUTOR || SYZ_ENABLE_KCSAN
+#define KCSAN_DEBUGFS_FILE "/sys/kernel/debug/kcsan"
+
+static void setup_kcsan()
+{
+	if (!write_file(KCSAN_DEBUGFS_FILE, "on"))
+		fail("failed to enable KCSAN");
+}
+
+#if SYZ_EXECUTOR // currently only used by executor
+static void setup_kcsan_filterlist(char** frames, int nframes, bool blacklist)
+{
+	int fd = open(KCSAN_DEBUGFS_FILE, O_WRONLY);
+	if (fd == -1)
+		fail("failed to open(\"%s\")", KCSAN_DEBUGFS_FILE);
+
+	const char* const filtertype = blacklist ? "blacklist" : "whitelist";
+	printf("adding functions to KCSAN %s: ", filtertype);
+	dprintf(fd, "%s\n", filtertype);
+	for (int i = 0; i < nframes; ++i) {
+		printf("'%s' ", frames[i]);
+		dprintf(fd, "!%s\n", frames[i]);
+	}
+	printf("\n");
+
+	close(fd);
+}
+
+#define SYZ_HAVE_KCSAN 1
+#endif
 #endif

@@ -566,6 +566,45 @@ func linuxStallFrameExtractor(frames []string) (string, string) {
 	return "", "did not find any anchor frame"
 }
 
+func linuxHangTaskFrameExtractor(frames []string) (string, string) {
+	// The problem with task hung reports is that they manifest at random victim stacks,
+	// rather at the root cause stack. E.g. if there is something wrong with RCU subsystem,
+	// we are getting hangs all over the kernel on all synchronize_* calls.
+	// So before resotring to the common logic of skipping some common frames,
+	// we look for 2 common buckets: hangs on synchronize_rcu and hangs on rtnl_lock
+	// and group these together.
+	const synchronizeRCU = "synchronize_rcu"
+	anchorFrames := map[string]string{
+		"rtnl_lock":         "",
+		"synchronize_rcu":   synchronizeRCU,
+		"synchronize_srcu":  synchronizeRCU,
+		"synchronize_net":   synchronizeRCU,
+		"synchronize_sched": synchronizeRCU,
+	}
+	for _, frame := range frames {
+		for anchor, replacement := range anchorFrames {
+			if strings.HasPrefix(frame, anchor) {
+				if replacement != "" {
+					frame = replacement
+				}
+				return frame, ""
+			}
+		}
+	}
+	skip := []string{"sched", "_lock", "_slowlock", "down", "completion", "kthread",
+		"wait", "synchronize", "context_switch", "__switch_to", "cancel_delayed_work"}
+nextFrame:
+	for _, frame := range frames {
+		for _, ignore := range skip {
+			if strings.Contains(frame, ignore) {
+				continue nextFrame
+			}
+		}
+		return frame, ""
+	}
+	return "", "all frames are skipped"
+}
+
 var linuxStallAnchorFrames = []*regexp.Regexp{
 	// Various generic functions that dispatch work.
 	// We also include some of their callers, so that if some names change
@@ -637,7 +676,7 @@ var (
 	linuxSymbolizeRe = regexp.MustCompile(`(?:\[\<(?:[0-9a-f]+)\>\])?[ \t]+(?:[0-9]+:)?([a-zA-Z0-9_.]+)\+0x([0-9a-f]+)/0x([0-9a-f]+)`)
 	stackFrameRe     = regexp.MustCompile(`^ *(?:\[\<?(?:[0-9a-f]+)\>?\] ?){0,2}[ \t]+(?:[0-9]+:)?([a-zA-Z0-9_.]+)\+0x([0-9a-f]+)/0x([0-9a-f]+)`)
 	linuxRcuStall    = compile("INFO: rcu_(?:preempt|sched|bh) (?:self-)?detected(?: expedited)? stall")
-	linuxRipFrame    = compile(`IP: (?:(?:[0-9]+:)?(?:{{PC}} +){0,2}{{FUNC}}|[0-9]+:0x[0-9a-f]+|(?:[0-9]+:)?{{PC}} +\[< *\(null\)>\] +\(null\)|[0-9]+: +\(null\))`)
+	linuxRipFrame    = compile(`N?IP:? (?:(?:[0-9]+:)?(?:{{PC}} +){0,2}{{FUNC}}|[0-9]+:0x[0-9a-f]+|(?:[0-9]+:)?{{PC}} +\[< *\(null\)>\] +\(null\)|[0-9]+: +\(null\))`)
 )
 
 var linuxCorruptedTitles = []*regexp.Regexp{
@@ -765,12 +804,29 @@ var linuxStackParams = &stackParams{
 		"flush_workqueue",
 		"drain_workqueue",
 		"destroy_workqueue",
+		"finish_wait",
+		"kthread_stop",
+		"kobject_del",
 		"get_device_parent",
 		"device_add",
-		"finish_wait",
+		"device_del",
+		"device_unregister",
+		"device_destroy",
+		"hwrng_unregister",
+		"i2c_del_adapter",
+		"__unregister_client",
+		"device_for_each_child",
 		"rollback_registered",
 		"unregister_netdev",
+		"sysfs_remove",
+		"device_remove_file",
+		"tty_unregister_device",
+		"dummy_urb_enqueue",
 		"usb_kill_urb",
+		"usb_kill_anchored_urbs",
+		"usb_control_msg",
+		"usb_hcd_submit_urb",
+		"usb_submit_urb",
 	},
 	corruptedLines: []*regexp.Regexp{
 		// Fault injection stacks are frequently intermixed with crash reports.
@@ -797,7 +853,7 @@ func warningStackFmt(skip ...string) *stackFmt {
 	}
 }
 
-var linuxOopses = []*oops{
+var linuxOopses = append([]*oops{
 	{
 		[]byte("BUG:"),
 		[]oopsFormat{
@@ -854,7 +910,13 @@ var linuxOopses = []*oops{
 				},
 			},
 			{
-				title: compile("BUG: (?:unable to handle kernel paging request|unable to handle page fault for address)"),
+				title:        compile("BUG: KCSAN:"),
+				report:       compile("BUG: KCSAN: (.*)"),
+				fmt:          "KCSAN: %[1]v",
+				noStackTrace: true,
+			},
+			{
+				title: compile("BUG: (?:unable to handle kernel paging request|unable to handle page fault for address|Unable to handle kernel data access)"),
 				fmt:   "BUG: unable to handle kernel paging request in %[1]v",
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
@@ -865,7 +927,7 @@ var linuxOopses = []*oops{
 				},
 			},
 			{
-				title: compile("BUG: (?:unable to handle kernel NULL pointer dereference|kernel NULL pointer dereference)"),
+				title: compile("BUG: (?:unable to handle kernel NULL pointer dereference|kernel NULL pointer dereference|Kernel NULL pointer dereference)"),
 				fmt:   "BUG: unable to handle kernel NULL pointer dereference in %[1]v",
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
@@ -878,7 +940,7 @@ var linuxOopses = []*oops{
 			{
 				// Sometimes with such BUG failures, the second part of the header doesn't get printed
 				// or gets corrupted, because kernel prints it as two separate printk() calls.
-				title:     compile("BUG: unable to handle kernel"),
+				title:     compile("BUG: (?:unable to handle kernel|Unable to handle kernel)"),
 				fmt:       "BUG: unable to handle kernel",
 				corrupted: true,
 			},
@@ -1036,7 +1098,7 @@ var linuxOopses = []*oops{
 				// Skip all users of ODEBUG as well.
 				stack: warningStackFmt("debug_", "rcu", "hrtimer_", "timer_",
 					"work_", "percpu_", "kmem_", "slab_", "kfree", "vunmap",
-					"vfree", "__free_", "debug_check"),
+					"vfree", "__free_", "debug_check", "kobject_"),
 			},
 			{
 				title: compile("WARNING: .*mm/usercopy\\.c.* usercopy_warn"),
@@ -1240,9 +1302,7 @@ var linuxOopses = []*oops{
 						compile("Call Trace:"),
 						parseStackTrace,
 					},
-					skip: []string{"sched", "_lock", "down", "completion", "kthread",
-						"wait", "synchronize", "context_switch", "__switch_to",
-					},
+					extractor: linuxHangTaskFrameExtractor,
 				},
 			},
 			{
@@ -1261,6 +1321,7 @@ var linuxOopses = []*oops{
 			compile("INFO: lockdep is turned off"),
 			compile("INFO: Stall ended before state dump start"),
 			compile("INFO: NMI handler"),
+			compile("INFO: recovery required on readonly filesystem"),
 			compile("(handler|interrupt).*took too long"),
 			compile("_INFO::"),                                       // Android can print this during boot.
 			compile("INFO: sys_.* is not present in /proc/kallsyms"), // pkg/host output in debug mode
@@ -1523,4 +1584,4 @@ var linuxOopses = []*oops{
 		},
 		[]*regexp.Regexp{},
 	},
-}
+}, commonOopses...)

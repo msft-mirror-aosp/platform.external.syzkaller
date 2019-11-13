@@ -27,11 +27,17 @@ import (
 	"github.com/google/syzkaller/vm"
 )
 
-type Env struct {
+type BuilderTester interface {
+	BuildSyzkaller(string, string) error
+	BuildKernel(string, string, string, string, []byte) (string, error)
+	Test(numVMs int, reproSyz, reproOpts, reproC []byte) ([]error, error)
+}
+
+type env struct {
 	cfg *mgrconfig.Config
 }
 
-func NewEnv(cfg *mgrconfig.Config) (*Env, error) {
+func NewEnv(cfg *mgrconfig.Config) (BuilderTester, error) {
 	if !vm.AllowsOvercommit(cfg.Type) {
 		return nil, fmt.Errorf("test instances are not supported for %v VMs", cfg.Type)
 	}
@@ -47,13 +53,13 @@ func NewEnv(cfg *mgrconfig.Config) (*Env, error) {
 	if err := osutil.MkdirAll(cfg.Workdir); err != nil {
 		return nil, fmt.Errorf("failed to create tmp dir: %v", err)
 	}
-	env := &Env{
+	env := &env{
 		cfg: cfg,
 	}
 	return env, nil
 }
 
-func (env *Env) BuildSyzkaller(repo, commit string) error {
+func (env *env) BuildSyzkaller(repo, commit string) error {
 	cfg := env.cfg
 	srcIndex := strings.LastIndex(cfg.Syzkaller, "/src/")
 	if srcIndex == -1 {
@@ -82,16 +88,25 @@ func (env *Env) BuildSyzkaller(repo, commit string) error {
 	return nil
 }
 
-func (env *Env) BuildKernel(compilerBin, userspaceDir, cmdlineFile, sysctlFile string,
-	kernelConfig []byte) (string, error) {
-	cfg := env.cfg
-	imageDir := filepath.Join(cfg.Workdir, "image")
-	if err := build.Image(cfg.TargetOS, cfg.TargetVMArch, cfg.Type,
-		cfg.KernelSrc, imageDir, compilerBin, userspaceDir,
-		cmdlineFile, sysctlFile, kernelConfig); err != nil {
+func (env *env) BuildKernel(compilerBin, userspaceDir, cmdlineFile, sysctlFile string, kernelConfig []byte) (
+	string, error) {
+	imageDir := filepath.Join(env.cfg.Workdir, "image")
+	params := &build.Params{
+		TargetOS:     env.cfg.TargetOS,
+		TargetArch:   env.cfg.TargetVMArch,
+		VMType:       env.cfg.Type,
+		KernelDir:    env.cfg.KernelSrc,
+		OutputDir:    imageDir,
+		Compiler:     compilerBin,
+		UserspaceDir: userspaceDir,
+		CmdlineFile:  cmdlineFile,
+		SysctlFile:   sysctlFile,
+		Config:       kernelConfig,
+	}
+	if _, err := build.Image(params); err != nil {
 		return "", err
 	}
-	if err := SetConfigImage(cfg, imageDir, true); err != nil {
+	if err := SetConfigImage(env.cfg, imageDir, true); err != nil {
 		return "", err
 	}
 	kernelConfigFile := filepath.Join(imageDir, "kernel.config")
@@ -170,7 +185,7 @@ func (err *CrashError) Error() string {
 // Test boots numVMs VMs, tests basic kernel operation, and optionally tests the provided reproducer.
 // TestError is returned if there is a problem with kernel/image (crash, reboot loop, etc).
 // CrashError is returned if the reproducer crashes kernel.
-func (env *Env) Test(numVMs int, reproSyz, reproOpts, reproC []byte) ([]error, error) {
+func (env *env) Test(numVMs int, reproSyz, reproOpts, reproC []byte) ([]error, error) {
 	if err := mgrconfig.Complete(env.cfg); err != nil {
 		return nil, err
 	}
