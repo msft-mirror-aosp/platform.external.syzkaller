@@ -1,2 +1,4 @@
-yim@google.com
-jiwonshin@google.com
+include platform/system/core:/janitors/OWNERS
+
+kalder@google.com
+mspector@google.com
