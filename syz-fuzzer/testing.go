@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/ipc"
 	"github.com/google/syzkaller/pkg/log"
@@ -29,18 +28,17 @@ type checkArgs struct {
 	allSandboxes   bool
 	ipcConfig      *ipc.Config
 	ipcExecOpts    *ipc.ExecOpts
-	featureFlags   map[string]csource.Feature
 }
 
 func testImage(hostAddr string, args *checkArgs) {
 	log.Logf(0, "connecting to host at %v", hostAddr)
 	conn, err := rpctype.Dial(hostAddr)
 	if err != nil {
-		log.Fatalf("BUG: failed to connect to host: %v", err)
+		log.Fatalf("failed to connect: %v", err)
 	}
 	conn.Close()
 	if _, err := checkMachine(args); err != nil {
-		log.Fatalf("BUG: %v", err)
+		log.Fatalf("%v", err)
 	}
 }
 
@@ -92,7 +90,7 @@ func convertTestReq(target *prog.Target, req *rpctype.RunTestPollRes) *runtest.R
 		test.Bin = bin
 	}
 	if len(req.Prog) != 0 {
-		p, err := target.Deserialize(req.Prog, prog.NonStrict)
+		p, err := target.Deserialize(req.Prog)
 		if err != nil {
 			test.Err = err
 			return test
@@ -103,7 +101,6 @@ func convertTestReq(target *prog.Target, req *rpctype.RunTestPollRes) *runtest.R
 }
 
 func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
-	log.Logf(0, "checking machine...")
 	// Machine checking can be very slow on some machines (qemu without kvm, KMEMLEAK linux, etc),
 	// so print periodic heartbeats for vm.MonitorExecution so that it does not decide that we are dead.
 	done := make(chan bool)
@@ -139,11 +136,7 @@ func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
 		args.ipcConfig.Flags&ipc.FlagSandboxNamespace != 0 {
 		return nil, fmt.Errorf("sandbox=namespace is not supported (%v)", feat.Reason)
 	}
-	if feat := features[host.FeatureSandboxAndroidUntrustedApp]; !feat.Enabled &&
-		args.ipcConfig.Flags&ipc.FlagSandboxAndroidUntrustedApp != 0 {
-		return nil, fmt.Errorf("sandbox=android_untrusted_app is not supported (%v)", feat.Reason)
-	}
-	if err := checkSimpleProgram(args, features); err != nil {
+	if err := checkSimpleProgram(args); err != nil {
 		return nil, err
 	}
 	res := &rpctype.CheckArgs{
@@ -162,11 +155,11 @@ func checkMachine(args *checkArgs) (*rpctype.CheckArgs, error) {
 	}
 	for _, sandbox := range sandboxes {
 		enabledCalls, disabledCalls, err := buildCallList(args.target, args.enabledCalls, sandbox)
+		if err != nil {
+			return nil, err
+		}
 		res.EnabledCalls[sandbox] = enabledCalls
 		res.DisabledCalls[sandbox] = disabledCalls
-		if err != nil {
-			return res, err
-		}
 	}
 	if args.allSandboxes {
 		var enabled []int
@@ -222,34 +215,34 @@ func checkRevisions(args *checkArgs) error {
 	return nil
 }
 
-func checkSimpleProgram(args *checkArgs, features *host.Features) error {
+func checkSimpleProgram(args *checkArgs) error {
 	log.Logf(0, "testing simple program...")
-	if err := host.Setup(args.target, features, args.featureFlags, args.ipcConfig.Executor); err != nil {
-		return fmt.Errorf("host setup failed: %v", err)
-	}
 	env, err := ipc.MakeEnv(args.ipcConfig, 0)
 	if err != nil {
 		return fmt.Errorf("failed to create ipc env: %v", err)
 	}
 	defer env.Close()
 	p := args.target.GenerateSimpleProg()
-	output, info, hanged, err := env.Exec(args.ipcExecOpts, p)
+	output, info, failed, hanged, err := env.Exec(args.ipcExecOpts, p)
 	if err != nil {
 		return fmt.Errorf("program execution failed: %v\n%s", err, output)
 	}
 	if hanged {
 		return fmt.Errorf("program hanged:\n%s", output)
 	}
-	if len(info.Calls) == 0 {
+	if failed {
+		return fmt.Errorf("program failed:\n%s", output)
+	}
+	if len(info) == 0 {
 		return fmt.Errorf("no calls executed:\n%s", output)
 	}
-	if info.Calls[0].Errno != 0 {
-		return fmt.Errorf("simple call failed: %+v\n%s", info.Calls[0], output)
+	if info[0].Errno != 0 {
+		return fmt.Errorf("simple call failed: %+v\n%s", info[0], output)
 	}
-	if args.ipcConfig.Flags&ipc.FlagSignal != 0 && len(info.Calls[0].Signal) < 2 {
+	if args.ipcConfig.Flags&ipc.FlagSignal != 0 && len(info[0].Signal) < 2 {
 		return fmt.Errorf("got no coverage:\n%s", output)
 	}
-	if len(info.Calls[0].Signal) < 1 {
+	if len(info[0].Signal) < 1 {
 		return fmt.Errorf("got no fallback coverage:\n%s", output)
 	}
 	return nil
@@ -257,7 +250,6 @@ func checkSimpleProgram(args *checkArgs, features *host.Features) error {
 
 func buildCallList(target *prog.Target, enabledCalls []int, sandbox string) (
 	enabled []int, disabled []rpctype.SyscallReason, err error) {
-	log.Logf(0, "building call list...")
 	calls := make(map[*prog.Syscall]bool)
 	if len(enabledCalls) != 0 {
 		for _, n := range enabledCalls {
@@ -296,11 +288,11 @@ func buildCallList(target *prog.Target, enabledCalls []int, sandbox string) (
 			delete(calls, c)
 		}
 	}
+	if len(calls) == 0 {
+		return nil, nil, fmt.Errorf("all system calls are disabled")
+	}
 	for c := range calls {
 		enabled = append(enabled, c.ID)
-	}
-	if len(calls) == 0 {
-		return enabled, disabled, fmt.Errorf("all system calls are disabled")
 	}
 	return enabled, disabled, nil
 }

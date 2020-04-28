@@ -6,7 +6,6 @@ package prog
 import (
 	"fmt"
 	"math/rand"
-	"os"
 	"testing"
 	"time"
 )
@@ -32,18 +31,15 @@ func initTargetTest(t *testing.T, os, arch string) *Target {
 }
 
 func randSource(t *testing.T) rand.Source {
-	seed := time.Now().UnixNano()
-	if os.Getenv("TRAVIS") != "" {
-		seed = 0 // required for deterministic coverage reports
-	}
+	seed := int64(time.Now().UnixNano())
 	t.Logf("seed=%v", seed)
 	return rand.NewSource(seed)
 }
 
 func iterCount() int {
-	iters := 1000
+	iters := 10000
 	if testing.Short() {
-		iters /= 10
+		iters = 100
 	}
 	if raceEnabled {
 		iters /= 10
@@ -88,15 +84,4 @@ func testEachTargetRandom(t *testing.T, fn func(t *testing.T, target *Target, rs
 			fn(t, target, rs, iters)
 		})
 	}
-}
-
-func initBench(b *testing.B) (*Target, func()) {
-	olddebug := debug
-	debug = false
-	target, err := GetTarget("linux", "amd64")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ReportAllocs()
-	return target, func() { debug = olddebug }
 }

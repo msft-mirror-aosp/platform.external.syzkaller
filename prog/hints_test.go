@@ -12,13 +12,11 @@ import (
 	"testing"
 )
 
-type uint64Set map[uint64]bool
-
 type ConstArgTest struct {
 	name  string
 	in    uint64
 	comps CompMap
-	res   []uint64
+	res   uint64Set
 }
 
 type DataArgTest struct {
@@ -36,8 +34,8 @@ func TestHintsCheckConstArg(t *testing.T) {
 		{
 			"One replacer test",
 			0xdeadbeef,
-			CompMap{0xdeadbeef: uint64Set{0xdeadbeef: true, 0xcafebabe: true}},
-			[]uint64{0xcafebabe},
+			CompMap{0xdeadbeef: uint64Set{0xcafebabe: true}},
+			uint64Set{0xcafebabe: true},
 		},
 		// Test for cases when there's multiple comparisons (op1, op2), (op1, op3), ...
 		// Checks that for every such operand a program is generated.
@@ -45,22 +43,23 @@ func TestHintsCheckConstArg(t *testing.T) {
 			"Multiple replacers test",
 			0xabcd,
 			CompMap{0xabcd: uint64Set{0x2: true, 0x3: true}},
-			[]uint64{0x2, 0x3},
+			uint64Set{0x2: true, 0x3: true},
 		},
 		// Checks that special ints are not used.
 		{
 			"Special ints test",
 			0xabcd,
 			CompMap{0xabcd: uint64Set{0x1: true, 0x2: true}},
-			[]uint64{0x2},
+			uint64Set{0x2: true},
 		},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%v", test.name), func(t *testing.T) {
-			var res []uint64
+			t.Parallel()
+			res := uint64Set{}
 			constArg := &ConstArg{ArgCommon{nil}, test.in}
 			checkConstArg(constArg, test.comps, func() {
-				res = append(res, constArg.Val)
+				res[constArg.Val] = true
 			})
 			if !reflect.DeepEqual(res, test.res) {
 				t.Fatalf("\ngot : %v\nwant: %v", res, test.res)
@@ -78,11 +77,7 @@ func TestHintsCheckDataArg(t *testing.T) {
 		{
 			"One replacer test",
 			"\xef\xbe\xad\xde",
-			CompMap{
-				0xdeadbeef: uint64Set{0xcafebabe: true, 0xdeadbeef: true},
-				0xbeef:     uint64Set{0xbeef: true},
-				0xef:       uint64Set{0xef: true},
-			},
+			CompMap{0xdeadbeef: uint64Set{0xcafebabe: true}},
 			map[string]bool{
 				"\xbe\xba\xfe\xca": true,
 			},
@@ -193,6 +188,7 @@ func TestHintsCheckDataArg(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%v", test.name), func(t *testing.T) {
+			t.Parallel()
 			res := make(map[string]bool)
 			// Whatever type here. It's just needed to pass the
 			// dataArg.Type().Dir() == DirIn check.
@@ -240,15 +236,15 @@ func TestHintsShrinkExpand(t *testing.T) {
 				0x34:   uint64Set{0xab: true},
 				0x1234: uint64Set{0xcdcd: true},
 			},
-			[]uint64{0x12ab, 0xcdcd},
+			uint64Set{0x12ab: true, 0xcdcd: true},
 		},
 		{
 			// Models the following code:
 			// void f(u32 dw) {
 			//		u8 b = (u8) dw
 			//		i16 w = (i16) dw
-			//		if (b == 0xab) {...}
-			//		if (w == 0xcdcd) {...}
+			//		if (a == 0xab) {...}
+			//		if (b == 0xcdcd) {...}
 			//		if (dw == 0xefefefef) {...}
 			//  }; f(0x12345678);
 			"Shrink 32 test",
@@ -258,7 +254,7 @@ func TestHintsShrinkExpand(t *testing.T) {
 				0x5678:     uint64Set{0xcdcd: true},
 				0x12345678: uint64Set{0xefefefef: true},
 			},
-			[]uint64{0x123456ab, 0x1234cdcd, 0xefefefef},
+			uint64Set{0x123456ab: true, 0x1234cdcd: true, 0xefefefef: true},
 		},
 		{
 			// Models the following code:
@@ -266,24 +262,24 @@ func TestHintsShrinkExpand(t *testing.T) {
 			//		u8 b = (u8) qw
 			//		u16 w = (u16) qw
 			//		u32 dw = (u32) qw
-			//		if (b == 0xab) {...}
-			//		if (w == 0xcdcd) {...}
+			//		if (a == 0xab) {...}
+			//		if (b == 0xcdcd) {...}
 			//		if (dw == 0xefefefef) {...}
 			//		if (qw == 0x0101010101010101) {...}
 			//  }; f(0x1234567890abcdef);
 			"Shrink 64 test",
 			0x1234567890abcdef,
 			CompMap{
-				0xef:               uint64Set{0xab: true, 0xef: true},
+				0xef:               uint64Set{0xab: true},
 				0xcdef:             uint64Set{0xcdcd: true},
 				0x90abcdef:         uint64Set{0xefefefef: true},
 				0x1234567890abcdef: uint64Set{0x0101010101010101: true},
 			},
-			[]uint64{
-				0x0101010101010101,
-				0x1234567890abcdab,
-				0x1234567890abcdcd,
-				0x12345678efefefef,
+			uint64Set{
+				0x1234567890abcdab: true,
+				0x1234567890abcdcd: true,
+				0x12345678efefefef: true,
+				0x0101010101010101: true,
 			},
 		},
 		{
@@ -314,7 +310,7 @@ func TestHintsShrinkExpand(t *testing.T) {
 			"Shrink with a wider replacer test2",
 			0x1234,
 			CompMap{0x34: uint64Set{0xfffffffffffffffd: true}},
-			[]uint64{0x12fd},
+			uint64Set{0x12fd: true},
 		},
 		// -----------------------------------------------------------------
 		// Extend tests:
@@ -329,7 +325,7 @@ func TestHintsShrinkExpand(t *testing.T) {
 			"Extend 8 test",
 			0xff,
 			CompMap{0xffffffffffffffff: uint64Set{0xfffffffffffffffe: true}},
-			[]uint64{0xfe},
+			uint64Set{0xfe: true},
 		},
 		{
 			// Models the following code:
@@ -340,7 +336,7 @@ func TestHintsShrinkExpand(t *testing.T) {
 			"Extend 16 test",
 			0xffff,
 			CompMap{0xffffffffffffffff: uint64Set{0xfffffffffffffffe: true}},
-			[]uint64{0xfffe},
+			uint64Set{0xfffe: true},
 		},
 		{
 			// Models the following code:
@@ -351,7 +347,7 @@ func TestHintsShrinkExpand(t *testing.T) {
 			"Extend 32 test",
 			0xffffffff,
 			CompMap{0xffffffffffffffff: uint64Set{0xfffffffffffffffe: true}},
-			[]uint64{0xfffffffe},
+			uint64Set{0xfffffffe: true},
 		},
 		{
 			// Models the following code:
@@ -369,6 +365,7 @@ func TestHintsShrinkExpand(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%v", test.name), func(t *testing.T) {
+			t.Parallel()
 			res := shrinkExpand(test.in, test.comps)
 			if !reflect.DeepEqual(res, test.res) {
 				t.Fatalf("\ngot : %v\nwant: %v", res, test.res)
@@ -429,7 +426,6 @@ func extractValues(c *Call) map[uint64]bool {
 			}
 		}
 	})
-	delete(vals, 0) // replacing 0 can yield too many condidates
 	return vals
 }
 
@@ -480,8 +476,13 @@ func TestHintsData(t *testing.T) {
 }
 
 func BenchmarkHints(b *testing.B) {
-	target, cleanup := initBench(b)
-	defer cleanup()
+	olddebug := debug
+	debug = false
+	defer func() { debug = olddebug }()
+	target, err := GetTarget("linux", "amd64")
+	if err != nil {
+		b.Fatal(err)
+	}
 	rs := rand.NewSource(0)
 	r := newRand(target, rs)
 	p := target.Generate(rs, 30, nil)

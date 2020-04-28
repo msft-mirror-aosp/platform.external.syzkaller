@@ -10,13 +10,29 @@ import (
 
 func InitTarget(target *prog.Target) {
 	arch := &arch{
-		unix: targets.MakeUnixSanitizer(target),
+		MAP_FIXED: target.ConstMap["MAP_FIXED"],
 	}
 
 	target.MakeMmap = targets.MakePosixMmap(target)
-	target.SanitizeCall = arch.unix.SanitizeCall
+	target.SanitizeCall = arch.sanitizeCall
 }
 
 type arch struct {
-	unix *targets.UnixSanitizer
+	MAP_FIXED uint64
+}
+
+func (arch *arch) sanitizeCall(c *prog.Call) {
+	switch c.Meta.CallName {
+	case "mmap":
+		// Add MAP_FIXED flag, otherwise it produces non-deterministic results.
+		c.Args[3].(*prog.ConstArg).Val |= arch.MAP_FIXED
+	case "mknod", "mknodat":
+		break
+	case "exit":
+		code := c.Args[0].(*prog.ConstArg)
+		// These codes are reserved by executor.
+		if code.Val%128 == 67 || code.Val%128 == 68 {
+			code.Val = 1
+		}
+	}
 }

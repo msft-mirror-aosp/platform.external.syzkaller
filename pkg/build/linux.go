@@ -10,11 +10,13 @@
 package build
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/google/syzkaller/pkg/osutil"
@@ -24,17 +26,16 @@ type linux struct{}
 
 func (linux linux) build(targetArch, vmType, kernelDir, outputDir, compiler, userspaceDir,
 	cmdlineFile, sysctlFile string, config []byte) error {
-	if err := linux.buildKernel(targetArch, kernelDir, outputDir, compiler, config); err != nil {
+	if err := linux.buildKernel(kernelDir, outputDir, compiler, config); err != nil {
 		return err
 	}
-	if err := linux.createImage(targetArch, vmType, kernelDir, outputDir, userspaceDir, cmdlineFile,
-		sysctlFile); err != nil {
+	if err := linux.createImage(vmType, kernelDir, outputDir, userspaceDir, cmdlineFile, sysctlFile); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (linux) buildKernel(targetArch, kernelDir, outputDir, compiler string, config []byte) error {
+func (linux) buildKernel(kernelDir, outputDir, compiler string, config []byte) error {
 	configFile := filepath.Join(kernelDir, ".config")
 	if err := osutil.WriteFile(configFile, config); err != nil {
 		return fmt.Errorf("failed to write config file: %v", err)
@@ -45,7 +46,12 @@ func (linux) buildKernel(targetArch, kernelDir, outputDir, compiler string, conf
 	// One would expect olddefconfig here, but olddefconfig is not present in v3.6 and below.
 	// oldconfig is the same as olddefconfig if stdin is not set.
 	// Note: passing in compiler is important since 4.17 (at the very least it's noted in the config).
-	if err := runMake(kernelDir, "oldconfig", "CC="+compiler); err != nil {
+	cmd := osutil.Command("make", "oldconfig", "CC="+compiler)
+	if err := osutil.Sandbox(cmd, true, true); err != nil {
+		return err
+	}
+	cmd.Dir = kernelDir
+	if _, err := osutil.Run(10*time.Minute, cmd); err != nil {
 		return err
 	}
 	// Write updated kernel config early, so that it's captured on build failures.
@@ -53,26 +59,25 @@ func (linux) buildKernel(targetArch, kernelDir, outputDir, compiler string, conf
 	if err := osutil.CopyFile(configFile, outputConfig); err != nil {
 		return err
 	}
-	// We build only zImage/bzImage as we currently don't use modules.
-	var target string
-	switch targetArch {
-	case "386", "amd64":
-		target = "bzImage"
-	case "ppc64le":
-		target = "zImage"
-	}
-	if err := runMake(kernelDir, target, "CC="+compiler); err != nil {
+	// We build only bzImage as we currently don't use modules.
+	cpu := strconv.Itoa(runtime.NumCPU())
+	cmd = osutil.Command("make", "bzImage", "-j", cpu, "CC="+compiler)
+	if err := osutil.Sandbox(cmd, true, true); err != nil {
 		return err
+	}
+	cmd.Dir = kernelDir
+	if _, err := osutil.Run(time.Hour, cmd); err != nil {
+		return extractRootCause(err)
 	}
 	vmlinux := filepath.Join(kernelDir, "vmlinux")
 	outputVmlinux := filepath.Join(outputDir, "obj", "vmlinux")
-	if err := osutil.Rename(vmlinux, outputVmlinux); err != nil {
+	if err := os.Rename(vmlinux, outputVmlinux); err != nil {
 		return fmt.Errorf("failed to rename vmlinux: %v", err)
 	}
 	return nil
 }
 
-func (linux) createImage(targetArch, vmType, kernelDir, outputDir, userspaceDir, cmdlineFile, sysctlFile string) error {
+func (linux) createImage(vmType, kernelDir, outputDir, userspaceDir, cmdlineFile, sysctlFile string) error {
 	tempDir, err := ioutil.TempDir("", "syz-build")
 	if err != nil {
 		return err
@@ -82,16 +87,8 @@ func (linux) createImage(targetArch, vmType, kernelDir, outputDir, userspaceDir,
 	if err := osutil.WriteExecFile(scriptFile, []byte(createImageScript)); err != nil {
 		return fmt.Errorf("failed to write script file: %v", err)
 	}
-
-	var kernelImage string
-	switch targetArch {
-	case "386", "amd64":
-		kernelImage = "arch/x86/boot/bzImage"
-	case "ppc64le":
-		kernelImage = "arch/powerpc/boot/zImage.pseries"
-	}
-	kernelImagePath := filepath.Join(kernelDir, filepath.FromSlash(kernelImage))
-	cmd := osutil.Command(scriptFile, userspaceDir, kernelImagePath, targetArch)
+	bzImage := filepath.Join(kernelDir, filepath.FromSlash("arch/x86/boot/bzImage"))
+	cmd := osutil.Command(scriptFile, userspaceDir, bzImage)
 	cmd.Dir = tempDir
 	cmd.Env = append([]string{}, os.Environ()...)
 	cmd.Env = append(cmd.Env,
@@ -117,27 +114,49 @@ func (linux) createImage(targetArch, vmType, kernelDir, outputDir, userspaceDir,
 	return nil
 }
 
-func (linux) clean(kernelDir, targetArch string) error {
-	return runMake(kernelDir, "distclean")
-}
-
-func runMake(kernelDir string, args ...string) error {
-	args = append(args, fmt.Sprintf("-j%v", runtime.NumCPU()))
-	cmd := osutil.Command("make", args...)
+func (linux) clean(kernelDir string) error {
+	cpu := strconv.Itoa(runtime.NumCPU())
+	cmd := osutil.Command("make", "distclean", "-j", cpu)
 	if err := osutil.Sandbox(cmd, true, true); err != nil {
 		return err
 	}
 	cmd.Dir = kernelDir
-	cmd.Env = append([]string{}, os.Environ()...)
-	// This makes the build [more] deterministic:
-	// 2 builds from the same sources should result in the same vmlinux binary.
-	// We plan to use it for detecting no-op changes during bisection.
-	cmd.Env = append(cmd.Env,
-		"KBUILD_BUILD_VERSION=0",
-		"KBUILD_BUILD_TIMESTAMP=now",
-		"KBUILD_BUILD_USER=syzkaller",
-		"KBUILD_BUILD_HOST=syzkaller",
-	)
-	_, err := osutil.Run(time.Hour, cmd)
+	_, err := osutil.Run(10*time.Minute, cmd)
 	return err
+}
+
+func extractRootCause(err error) error {
+	verr, ok := err.(*osutil.VerboseError)
+	if !ok {
+		return err
+	}
+	var cause []byte
+	for _, line := range bytes.Split(verr.Output, []byte{'\n'}) {
+		for _, pattern := range buildFailureCauses {
+			if pattern.weak && cause != nil {
+				continue
+			}
+			if bytes.Contains(line, pattern.pattern) {
+				cause = line
+				break
+			}
+		}
+	}
+	if cause != nil {
+		verr.Title = string(cause)
+	}
+	return KernelBuildError{verr}
+}
+
+type buildFailureCause struct {
+	pattern []byte
+	weak    bool
+}
+
+var buildFailureCauses = [...]buildFailureCause{
+	{pattern: []byte(": error: ")},
+	{pattern: []byte(": fatal error: ")},
+	{pattern: []byte(": undefined reference to")},
+	{weak: true, pattern: []byte(": final link failed: ")},
+	{weak: true, pattern: []byte("collect2: error: ")},
 }

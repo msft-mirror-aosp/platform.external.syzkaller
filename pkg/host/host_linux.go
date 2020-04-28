@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"regexp"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -17,22 +17,12 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/sys/linux"
 )
 
-type KcovRemoteArg struct {
-	TraceMode    uint32
-	AreaSize     uint32
-	NumHandles   uint32
-	CommonHandle uint64
-	// Handles []uint64 goes here.
-}
-
-func isSupported(c *prog.Syscall, target *prog.Target, sandbox string) (bool, string) {
-	log.Logf(2, "checking support for %v", c.Name)
+func isSupported(c *prog.Syscall, sandbox string) (bool, string) {
 	if strings.HasPrefix(c.CallName, "syz_") {
 		return isSupportedSyzkall(sandbox, c)
 	}
@@ -46,10 +36,6 @@ func isSupported(c *prog.Syscall, target *prog.Target, sandbox string) (bool, st
 	if strings.HasPrefix(c.Name, "mount$") {
 		return isSupportedMount(c, sandbox)
 	}
-	if c.Name == "ioctl$EXT4_IOC_SHUTDOWN" && sandbox == "none" {
-		// Don't shutdown root filesystem.
-		return false, "unsafe with sandbox=none"
-	}
 	// There are 3 possible strategies for detecting supported syscalls:
 	// 1. Executes all syscalls with presumably invalid arguments and check for ENOprog.
 	//    But not all syscalls are safe to execute. For example, pause will hang,
@@ -62,47 +48,23 @@ func isSupported(c *prog.Syscall, target *prog.Target, sandbox string) (bool, st
 	// Kallsyms seems to be the most reliable and fast. That's what we use first.
 	// If kallsyms is not present, we fallback to execution of syscalls.
 	kallsymsOnce.Do(func() {
-		kallsyms, _ := ioutil.ReadFile("/proc/kallsyms")
-		if len(kallsyms) == 0 {
-			return
-		}
-		kallsymsSyscallSet = parseKallsyms(kallsyms, target.Arch)
+		kallsyms, _ = ioutil.ReadFile("/proc/kallsyms")
 	})
-	if !testFallback && len(kallsymsSyscallSet) != 0 {
-		r, v := isSupportedKallsyms(c)
-		return r, v
+	if !testFallback && len(kallsyms) != 0 {
+		return isSupportedKallsyms(c)
 	}
 	return isSupportedTrial(c)
 }
 
-func parseKallsyms(kallsyms []byte, arch string) map[string]bool {
-	set := make(map[string]bool)
-	var re *regexp.Regexp
-	switch arch {
-	case "386", "amd64":
-		re = regexp.MustCompile(` T (__ia32_|__x64_)?sys_([^\n]+)\n`)
-	case "arm", "arm64":
-		re = regexp.MustCompile(` T (__arm64_)?sys_([^\n]+)\n`)
-	case "ppc64le":
-		re = regexp.MustCompile(` T ()?sys_([^\n]+)\n`)
-	default:
-		panic("unsupported arch for kallsyms parsing")
-	}
-	matches := re.FindAllSubmatch(kallsyms, -1)
-	for _, m := range matches {
-		name := string(m[2])
-		log.Logf(2, "found in kallsyms: %v", name)
-		set[name] = true
-	}
-	return set
-}
-
 func isSupportedKallsyms(c *prog.Syscall) (bool, string) {
 	name := c.CallName
-	if newname := kallsymsRenameMap[name]; newname != "" {
+	if newname := kallsymsMap[name]; newname != "" {
 		name = newname
 	}
-	if !kallsymsSyscallSet[name] {
+	if !bytes.Contains(kallsyms, []byte(" T sys_"+name+"\n")) &&
+		!bytes.Contains(kallsyms, []byte(" T ksys_"+name+"\n")) &&
+		!bytes.Contains(kallsyms, []byte(" T __ia32_sys_"+name+"\n")) &&
+		!bytes.Contains(kallsyms, []byte(" T __x64_sys_"+name+"\n")) {
 		return false, fmt.Sprintf("sys_%v is not present in /proc/kallsyms", name)
 	}
 	return true, ""
@@ -148,12 +110,11 @@ func init() {
 // umount2 is renamed to umount in arch/x86/entry/syscalls/syscall_64.tbl.
 // Where umount is renamed to oldumount is unclear.
 var (
-	kallsymsOnce       sync.Once
-	kallsymsSyscallSet map[string]bool
-	kallsymsRenameMap  = map[string]string{
+	kallsyms     []byte
+	kallsymsOnce sync.Once
+	kallsymsMap  = map[string]string{
 		"umount":  "oldumount",
 		"umount2": "umount",
-		"stat":    "newstat",
 	}
 	trialMu         sync.Mutex
 	trialSupported  = make(map[uint64]bool)
@@ -176,18 +137,6 @@ func isSupportedSyzkall(sandbox string, c *prog.Syscall) (bool, string) {
 		fname, ok := extractStringConst(c.Args[0])
 		if !ok {
 			panic("first open arg is not a pointer to string const")
-		}
-		if checkUSBInjection() == "" {
-			// These entries might not be available at boot time,
-			// but will be created by connected USB devices.
-			USBDevicePrefixes := []string{
-				"/dev/hidraw", "/dev/usb/hiddev", "/dev/input/",
-			}
-			for _, prefix := range USBDevicePrefixes {
-				if strings.HasPrefix(fname, prefix) {
-					return true, ""
-				}
-			}
 		}
 		var check func(dev string) bool
 		check = func(dev string) bool {
@@ -212,9 +161,6 @@ func isSupportedSyzkall(sandbox string, c *prog.Syscall) (bool, string) {
 		return true, ""
 	case "syz_emit_ethernet", "syz_extract_tcp_res":
 		reason := checkNetworkInjection()
-		return reason == "", reason
-	case "syz_usb_connect", "syz_usb_disconnect", "syz_usb_control_io", "syz_usb_ep_write", "syz_usb_ep_read":
-		reason := checkUSBInjection()
 		return reason == "", reason
 	case "syz_kvm_setup_cpu":
 		switch c.Name {
@@ -255,8 +201,6 @@ func isSupportedSyzkall(sandbox string, c *prog.Syscall) (bool, string) {
 		return isSupportedFilesystem(fstype)
 	case "syz_read_part_table":
 		return onlySandboxNone(sandbox)
-	case "syz_execute_func":
-		return true, ""
 	}
 	panic("unknown syzkall: " + c.Name)
 }
@@ -311,32 +255,18 @@ func isSupportedSocket(c *prog.Syscall) (bool, string) {
 }
 
 func isSupportedOpenAt(c *prog.Syscall) (bool, string) {
-	var fd int
-	var err error
-
 	fname, ok := extractStringConst(c.Args[1])
 	if !ok || len(fname) == 0 || fname[0] != '/' {
 		return true, ""
 	}
-
-	modes := []int{syscall.O_RDONLY, syscall.O_WRONLY, syscall.O_RDWR}
-
-	// Attempt to extract flags from the syscall description
-	if mode, ok := c.Args[2].(*prog.ConstType); ok {
-		modes = []int{int(mode.Val)}
+	fd, err := syscall.Open(fname, syscall.O_RDONLY, 0)
+	if fd != -1 {
+		syscall.Close(fd)
 	}
-
-	for _, mode := range modes {
-		fd, err = syscall.Open(fname, mode, 0)
-		if fd != -1 {
-			syscall.Close(fd)
-		}
-		if err == nil {
-			return true, ""
-		}
+	if err != nil {
+		return false, fmt.Sprintf("open(%v) failed: %v", fname, err)
 	}
-
-	return false, fmt.Sprintf("open(%v) failed: %v", fname, err)
+	return true, ""
 }
 
 func isSupportedMount(c *prog.Syscall, sandbox string) (bool, string) {
@@ -387,14 +317,15 @@ func extractStringConst(typ prog.Type) (string, bool) {
 func init() {
 	checkFeature[FeatureCoverage] = checkCoverage
 	checkFeature[FeatureComparisons] = checkComparisons
-	checkFeature[FeatureExtraCoverage] = checkExtraCoverage
 	checkFeature[FeatureSandboxSetuid] = unconditionallyEnabled
 	checkFeature[FeatureSandboxNamespace] = checkSandboxNamespace
-	checkFeature[FeatureSandboxAndroidUntrustedApp] = checkSandboxAndroidUntrustedApp
 	checkFeature[FeatureFaultInjection] = checkFaultInjection
+	setupFeature[FeatureFaultInjection] = setupFaultInjection
 	checkFeature[FeatureLeakChecking] = checkLeakChecking
+	setupFeature[FeatureLeakChecking] = setupLeakChecking
+	callbFeature[FeatureLeakChecking] = callbackLeakChecking
 	checkFeature[FeatureNetworkInjection] = checkNetworkInjection
-	checkFeature[FeatureNetworkDevices] = unconditionallyEnabled
+	checkFeature[FeatureNetworkDevices] = checkNetworkDevices
 }
 
 func checkCoverage() string {
@@ -411,14 +342,6 @@ func checkCoverage() string {
 }
 
 func checkComparisons() (reason string) {
-	return checkCoverageFeature(FeatureComparisons)
-}
-
-func checkExtraCoverage() (reason string) {
-	return checkCoverageFeature(FeatureExtraCoverage)
-}
-
-func checkCoverageFeature(feature int) (reason string) {
 	if reason = checkDebugFS(); reason != "" {
 		return reason
 	}
@@ -451,33 +374,13 @@ func checkCoverageFeature(feature int) (reason string) {
 			reason = fmt.Sprintf("munmap failed: %v", err)
 		}
 	}()
-	switch feature {
-	case FeatureComparisons:
-		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL,
-			uintptr(fd), linux.KCOV_ENABLE, linux.KCOV_TRACE_CMP)
-		if errno != 0 {
-			if errno == 524 { // ENOTSUPP
-				return "CONFIG_KCOV_ENABLE_COMPARISONS is not enabled"
-			}
-			return fmt.Sprintf("ioctl(KCOV_TRACE_CMP) failed: %v", errno)
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), linux.KCOV_ENABLE, linux.KCOV_TRACE_CMP)
+	if errno != 0 {
+		if errno == 524 { // ENOTSUPP
+			return "CONFIG_KCOV_ENABLE_COMPARISONS is not enabled"
 		}
-	case FeatureExtraCoverage:
-		arg := KcovRemoteArg{
-			TraceMode:    uint32(linux.KCOV_TRACE_PC),
-			AreaSize:     uint32(coverSize * unsafe.Sizeof(uintptr(0))),
-			NumHandles:   0,
-			CommonHandle: 0,
-		}
-		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL,
-			uintptr(fd), linux.KCOV_REMOTE_ENABLE, uintptr(unsafe.Pointer(&arg)))
-		if errno != 0 {
-			if errno == 25 { // ENOTTY
-				return "extra coverage is not supported by the kernel"
-			}
-			return fmt.Sprintf("ioctl(KCOV_REMOTE_ENABLE) failed: %v", errno)
-		}
-	default:
-		panic("unknown feature in checkCoverageFeature")
+		return fmt.Sprintf("ioctl(KCOV_TRACE_CMP) failed: %v", errno)
 	}
 	defer func() {
 		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), linux.KCOV_DISABLE, 0)
@@ -499,27 +402,155 @@ func checkFaultInjection() string {
 		return reason
 	}
 	if err := osutil.IsAccessible("/sys/kernel/debug/failslab/ignore-gfp-wait"); err != nil {
-		return "CONFIG_FAULT_INJECTION_DEBUG_FS or CONFIG_FAILSLAB are not enabled"
+		return "CONFIG_FAULT_INJECTION_DEBUG_FS is not enabled"
 	}
 	return ""
+}
+
+func setupFaultInjection() error {
+	if err := osutil.WriteFile("/sys/kernel/debug/failslab/ignore-gfp-wait", []byte("N")); err != nil {
+		return fmt.Errorf("failed to write /failslab/ignore-gfp-wait: %v", err)
+	}
+	if err := osutil.WriteFile("/sys/kernel/debug/fail_futex/ignore-private", []byte("N")); err != nil {
+		return fmt.Errorf("failed to write /fail_futex/ignore-private: %v", err)
+	}
+	if err := osutil.WriteFile("/sys/kernel/debug/fail_page_alloc/ignore-gfp-highmem", []byte("N")); err != nil {
+		return fmt.Errorf("failed to write /fail_page_alloc/ignore-gfp-highmem: %v", err)
+	}
+	if err := osutil.WriteFile("/sys/kernel/debug/fail_page_alloc/ignore-gfp-wait", []byte("N")); err != nil {
+		return fmt.Errorf("failed to write /fail_page_alloc/ignore-gfp-wait: %v", err)
+	}
+	if err := osutil.WriteFile("/sys/kernel/debug/fail_page_alloc/min-order", []byte("0")); err != nil {
+		return fmt.Errorf("failed to write /fail_page_alloc/min-order: %v", err)
+	}
+	return nil
 }
 
 func checkLeakChecking() string {
 	if reason := checkDebugFS(); reason != "" {
 		return reason
 	}
+	if err := osutil.IsAccessible("/sys/kernel/debug/kmemleak"); err != nil {
+		return "CONFIG_DEBUG_KMEMLEAK is not enabled"
+	}
+	return ""
+}
+
+func setupLeakChecking() error {
 	fd, err := syscall.Open("/sys/kernel/debug/kmemleak", syscall.O_RDWR, 0)
 	if err != nil {
-		return "CONFIG_DEBUG_KMEMLEAK is not enabled"
+		return fmt.Errorf("failed to open /sys/kernel/debug/kmemleak: %v", err)
 	}
 	defer syscall.Close(fd)
 	if _, err := syscall.Write(fd, []byte("scan=off")); err != nil {
-		if err == syscall.EBUSY {
-			return "KMEMLEAK disabled: increase CONFIG_DEBUG_KMEMLEAK_EARLY_LOG_SIZE or unset CONFIG_DEBUG_KMEMLEAK_DEFAULT_OFF"
+		// kmemleak returns EBUSY when kmemleak is already turned off.
+		if err != syscall.EBUSY {
+			return fmt.Errorf("write(kmemleak, scan=off) failed: %v", err)
 		}
-		return fmt.Sprintf("/sys/kernel/debug/kmemleak write failed: %v", err)
 	}
-	return ""
+	// Flush boot leaks.
+	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
+		return fmt.Errorf("write(kmemleak, scan) failed: %v", err)
+	}
+	time.Sleep(5 * time.Second) // account for MSECS_MIN_AGE
+	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
+		return fmt.Errorf("write(kmemleak, scan) failed: %v", err)
+	}
+	if _, err := syscall.Write(fd, []byte("clear")); err != nil {
+		return fmt.Errorf("write(kmemleak, clear) failed: %v", err)
+	}
+	return nil
+}
+
+func callbackLeakChecking() {
+	start := time.Now()
+	fd, err := syscall.Open("/sys/kernel/debug/kmemleak", syscall.O_RDWR, 0)
+	if err != nil {
+		panic(err)
+	}
+	defer syscall.Close(fd)
+	// KMEMLEAK has false positives. To mitigate most of them, it checksums
+	// potentially leaked objects, and reports them only on the next scan
+	// iff the checksum does not change. Because of that we do the following
+	// intricate dance:
+	// Scan, sleep, scan again. At this point we can get some leaks.
+	// If there are leaks, we sleep and scan again, this can remove
+	// false leaks. Then, read kmemleak again. If we get leaks now, then
+	// hopefully these are true positives during the previous testing cycle.
+	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
+		panic(err)
+	}
+	time.Sleep(time.Second)
+	// Account for MSECS_MIN_AGE
+	// (1 second less because scanning will take at least a second).
+	for time.Since(start) < 4*time.Second {
+		time.Sleep(time.Second)
+	}
+	if _, err := syscall.Write(fd, []byte("scan")); err != nil {
+		panic(err)
+	}
+	buf := make([]byte, 128<<10)
+	n, err := syscall.Read(fd, buf)
+	if err != nil {
+		panic(err)
+	}
+	if n != 0 {
+		time.Sleep(time.Second)
+		if _, err := syscall.Write(fd, []byte("scan")); err != nil {
+			panic(err)
+		}
+		n, err := syscall.Read(fd, buf)
+		if err != nil {
+			panic(err)
+		}
+		nleaks := 0
+		for buf = buf[:n]; len(buf) != 0; {
+			end := bytes.Index(buf[1:], []byte("unreferenced object"))
+			if end != -1 {
+				end++
+			} else {
+				end = len(buf)
+			}
+			report := buf[:end]
+			buf = buf[end:]
+			if kmemleakIgnore(report) {
+				continue
+			}
+			// BUG in output should be recognized by manager.
+			fmt.Printf("BUG: memory leak\n%s\n", report)
+			nleaks++
+		}
+		if nleaks != 0 {
+			os.Exit(1)
+		}
+	}
+	if _, err := syscall.Write(fd, []byte("clear")); err != nil {
+		panic(err)
+	}
+}
+
+func kmemleakIgnore(report []byte) bool {
+	// kmemleak has a bunch of false positives (at least what looks like
+	// false positives at first glance). So we are conservative with what we report.
+	// First, we filter out any allocations that don't come from executor processes.
+	// Second, we ignore a bunch of functions entirely.
+	// Ideally, someone should debug/fix all these cases and remove ignores.
+	if !bytes.Contains(report, []byte(`comm "syz-executor`)) {
+		return true
+	}
+	for _, ignore := range []string{
+		" copy_process",
+		" do_execveat_common",
+		" __ext4_",
+		" get_empty_filp",
+		" do_filp_open",
+		" new_inode",
+	} {
+		if bytes.Contains(report, []byte(ignore)) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkSandboxNamespace() string {
@@ -529,23 +560,16 @@ func checkSandboxNamespace() string {
 	return ""
 }
 
-func checkSandboxAndroidUntrustedApp() string {
-	if err := osutil.IsAccessible("/sys/fs/selinux/policy"); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
 func checkNetworkInjection() string {
 	if err := osutil.IsAccessible("/dev/net/tun"); err != nil {
 		return err.Error()
 	}
-	return ""
+	return checkNetworkDevices()
 }
 
-func checkUSBInjection() string {
-	if err := osutil.IsAccessible("/sys/kernel/debug/usb-fuzzer"); err != nil {
-		return err.Error()
+func checkNetworkDevices() string {
+	if _, err := exec.LookPath("ip"); err != nil {
+		return "ip command is not found"
 	}
 	return ""
 }

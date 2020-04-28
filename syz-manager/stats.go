@@ -4,7 +4,6 @@
 package main
 
 import (
-	"sync"
 	"sync/atomic"
 )
 
@@ -24,15 +23,10 @@ type Stats struct {
 	hubRecvProgDrop  Stat
 	hubRecvRepro     Stat
 	hubRecvReproDrop Stat
-	corpusCover      Stat
-	corpusSignal     Stat
-
-	mu         sync.Mutex
-	namedStats map[string]uint64
 }
 
 func (stats *Stats) all() map[string]uint64 {
-	m := map[string]uint64{
+	return map[string]uint64{
 		"crashes":              stats.crashes.get(),
 		"crash types":          stats.crashTypes.get(),
 		"suppressed":           stats.crashSuppressed.get(),
@@ -46,30 +40,6 @@ func (stats *Stats) all() map[string]uint64 {
 		"hub: recv prog drop":  stats.hubRecvProgDrop.get(),
 		"hub: recv repro":      stats.hubRecvRepro.get(),
 		"hub: recv repro drop": stats.hubRecvReproDrop.get(),
-		"cover":                stats.corpusCover.get(),
-		"signal":               stats.corpusSignal.get(),
-	}
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	for k, v := range stats.namedStats {
-		m[k] = v
-	}
-	return m
-}
-
-func (stats *Stats) mergeNamed(named map[string]uint64) {
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	if stats.namedStats == nil {
-		stats.namedStats = make(map[string]uint64)
-	}
-	for k, v := range named {
-		switch k {
-		case "exec total":
-			stats.execTotal.add(int(v))
-		default:
-			stats.namedStats[k] += v
-		}
 	}
 }
 
@@ -83,8 +53,4 @@ func (s *Stat) inc() {
 
 func (s *Stat) add(v int) {
 	atomic.AddUint64((*uint64)(s), uint64(v))
-}
-
-func (s *Stat) set(v int) {
-	atomic.StoreUint64((*uint64)(s), uint64(v))
 }

@@ -16,15 +16,14 @@ import (
 	"github.com/google/syzkaller/pkg/osutil"
 )
 
-func extract(info *compiler.ConstInfo, cc string, args []string, addSource string, declarePrintf, defineGlibcUse bool) (
+func extract(info *compiler.ConstInfo, cc string, args []string, addSource string, declarePrintf bool) (
 	map[string]uint64, map[string]bool, error) {
 	data := &CompileData{
-		AddSource:      addSource,
-		Defines:        info.Defines,
-		Includes:       info.Includes,
-		Values:         info.Consts,
-		DeclarePrintf:  declarePrintf,
-		DefineGlibcUse: defineGlibcUse,
+		AddSource:     addSource,
+		Defines:       info.Defines,
+		Includes:      info.Includes,
+		Values:        info.Consts,
+		DeclarePrintf: declarePrintf,
 	}
 	undeclared := make(map[string]bool)
 	bin, out, err := compile(cc, args, data)
@@ -37,9 +36,10 @@ func extract(info *compiler.ConstInfo, cc string, args []string, addSource strin
 			valMap[val] = true
 		}
 		for _, errMsg := range []string{
-			`error: [‘']([a-zA-Z0-9_]+)[’'] undeclared`,
-			`note: in expansion of macro [‘']([a-zA-Z0-9_]+)[’']`,
-			`error: use of undeclared identifier [‘']([a-zA-Z0-9_]+)[’']`,
+			"error: ‘([a-zA-Z0-9_]+)’ undeclared",
+			"error: '([a-zA-Z0-9_]+)' undeclared",
+			"note: in expansion of macro ‘([a-zA-Z0-9_]+)’",
+			"error: use of undeclared identifier '([a-zA-Z0-9_]+)'",
 		} {
 			re := regexp.MustCompile(errMsg)
 			matches := re.FindAllSubmatch(out, -1)
@@ -59,8 +59,7 @@ func extract(info *compiler.ConstInfo, cc string, args []string, addSource strin
 		}
 		bin, out, err = compile(cc, args, data)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to run compiler: %v %v\n%v\n%v",
-				cc, args, err, string(out))
+			return nil, nil, fmt.Errorf("failed to run compiler: %v\n%v", err, string(out))
 		}
 	}
 	defer os.Remove(bin)
@@ -90,12 +89,11 @@ func extract(info *compiler.ConstInfo, cc string, args []string, addSource strin
 }
 
 type CompileData struct {
-	AddSource      string
-	Defines        map[string]string
-	Includes       []string
-	Values         []string
-	DeclarePrintf  bool
-	DefineGlibcUse bool // workaround for incorrect flags to clang for fuchsia.
+	AddSource     string
+	Defines       map[string]string
+	Includes      []string
+	Values        []string
+	DeclarePrintf bool
 }
 
 func compile(cc string, args []string, data *CompileData) (bin string, out []byte, err error) {
@@ -123,12 +121,6 @@ func compile(cc string, args []string, data *CompileData) (bin string, out []byt
 
 var srcTemplate = template.Must(template.New("").Parse(`
 #define __asm__(...)
-
-{{if .DefineGlibcUse}}
-#ifndef __GLIBC_USE
-#	define __GLIBC_USE(X) 0
-#endif
-{{end}}
 
 {{range $incl := $.Includes}}
 #include <{{$incl}}>

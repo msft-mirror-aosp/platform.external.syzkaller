@@ -17,10 +17,6 @@ import (
 )
 
 func Test(t *testing.T) {
-	switch runtime.GOOS {
-	case "openbsd":
-		t.Skipf("broken on %v", runtime.GOOS)
-	}
 	for _, sysTarget := range targets.List["test"] {
 		sysTarget1 := targets.Get(sysTarget.OS, sysTarget.Arch)
 		t.Run(sysTarget1.Arch, func(t *testing.T) {
@@ -56,13 +52,6 @@ func test(t *testing.T, sysTarget *targets.Target) {
 		"":     calls,
 		"none": calls,
 	}
-	featureFlags, err := csource.ParseFeaturesFlags("none", "none", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := host.Setup(target, features, featureFlags, executor); err != nil {
-		t.Fatal(err)
-	}
 	requests := make(chan *RunRequest, 2*runtime.GOMAXPROCS(0))
 	go func() {
 		for req := range requests {
@@ -80,8 +69,6 @@ func test(t *testing.T, sysTarget *targets.Target) {
 			t.Helper()
 			t.Logf(text)
 		},
-		Retries: 7, // empirical number that seem to reduce flakes to zero
-		Verbose: true,
 	}
 	if err := ctx.Run(); err != nil {
 		t.Fatal(err)

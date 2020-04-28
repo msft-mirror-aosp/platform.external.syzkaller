@@ -1,6 +1,6 @@
 # Linux kernel configs
 
-List of recommended kernel configs for `syzkaller`. See [syzbot config](/dashboard/config/upstream-kasan.config) for a reference config.
+List of recommended kernel configs for `syzkaller`:
 
 ## Syzkaller features
 
@@ -28,32 +28,18 @@ CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
 ```
 
-For better sandboxing:
+For `namespace` sandbox:
 ```
 CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
 CONFIG_UTS_NS=y
 CONFIG_IPC_NS=y
 CONFIG_PID_NS=y
 CONFIG_NET_NS=y
-CONFIG_CGROUP_PIDS=y
-CONFIG_MEMCG=y
 ```
 
-For `namespace` sandbox:
-```
-CONFIG_USER_NS=y
-```
-
-For running in VMs `make kvmconfig` is generally required.
-
-Debian images produced by [tools/create-image.sh](/tools/create-image.sh) also require:
-```
-CONFIG_CONFIGFS_FS=y
-CONFIG_SECURITYFS=y
-```
-
-It is recommended to disable the following config (and required if your kernel doesn't have commits [arm64: setup: introduce kaslr_offset()](https://github.com/torvalds/linux/commit/7ede8665f27cde7da69e8b2fbeaa1ed0664879c5)
- and [kcov: make kcov work properly with KASLR enabled](https://github.com/torvalds/linux/commit/4983f0ab7ffaad1e534b21975367429736475205)):
+If your kernel doesn't have commits [arm64: setup: introduce kaslr_offset()](https://github.com/torvalds/linux/commit/7ede8665f27cde7da69e8b2fbeaa1ed0664879c5)
+ and [kcov: make kcov work properly with KASLR enabled](https://github.com/torvalds/linux/commit/4983f0ab7ffaad1e534b21975367429736475205), disable the following config:
 ```
 # CONFIG_RANDOMIZE_BASE is not set
 ```
@@ -103,13 +89,11 @@ CONFIG_HARDENED_USERCOPY=y
 CONFIG_LOCKUP_DETECTOR=y
 CONFIG_SOFTLOCKUP_DETECTOR=y
 CONFIG_HARDLOCKUP_DETECTOR=y
-CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
 CONFIG_DETECT_HUNG_TASK=y
 CONFIG_WQ_WATCHDOG=y
 ```
 
-Increase hung/stall timeout to reduce false positive rate:
+Increase RCU stall timeout to reduce false positive rate:
 ```
-CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=140
-CONFIG_RCU_CPU_STALL_TIMEOUT=100
+CONFIG_RCU_CPU_STALL_TIMEOUT=60
 ```

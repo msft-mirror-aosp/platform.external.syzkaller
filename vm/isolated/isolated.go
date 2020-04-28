@@ -20,7 +20,7 @@ import (
 )
 
 func init() {
-	vmimpl.Register("isolated", ctor, false)
+	vmimpl.Register("isolated", ctor)
 }
 
 type Config struct {
@@ -62,8 +62,7 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 			return nil, fmt.Errorf("bad target %q: %v", target, err)
 		}
 	}
-	if env.Debug && len(cfg.Targets) > 1 {
-		log.Logf(0, "limiting number of targets from %v to 1 in debug mode", len(cfg.Targets))
+	if env.Debug {
 		cfg.Targets = cfg.Targets[:1]
 	}
 	pool := &Pool{
@@ -200,7 +199,7 @@ func (inst *instance) repair() error {
 
 func (inst *instance) waitForSSH(timeout time.Duration) error {
 	return vmimpl.WaitForSSH(inst.debug, timeout, inst.targetAddr, inst.sshKey, inst.sshUser,
-		inst.os, inst.targetPort, nil)
+		inst.os, inst.targetPort)
 }
 
 func (inst *instance) waitForReboot(timeout int) error {
@@ -303,8 +302,8 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 	return vmimpl.Multiplex(cmd, merger, dmesg, timeout, stop, inst.closed, inst.debug)
 }
 
-func (inst *instance) Diagnose() ([]byte, bool) {
-	return nil, false
+func (inst *instance) Diagnose() bool {
+	return false
 }
 
 func splitTargetPort(addr string) (string, int, error) {

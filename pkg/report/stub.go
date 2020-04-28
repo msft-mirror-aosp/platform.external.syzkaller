@@ -3,13 +3,21 @@
 
 package report
 
+import (
+	"regexp"
+)
+
 type stub struct {
-	*config
+	kernelSrc string
+	kernelObj string
+	ignores   []*regexp.Regexp
 }
 
-func ctorStub(cfg *config) (Reporter, []string, error) {
+func ctorStub(kernelSrc, kernelObj string, ignores []*regexp.Regexp) (Reporter, []string, error) {
 	ctx := &stub{
-		config: cfg,
+		kernelSrc: kernelSrc,
+		kernelObj: kernelObj,
+		ignores:   ignores,
 	}
 	return ctx, nil, nil
 }

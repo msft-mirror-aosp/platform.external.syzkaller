@@ -74,7 +74,7 @@ func (mc *ManagerCmd) loop() {
 			// don't restart too frequently (in case it instantly exits with an error)
 			if time.Since(started) > restartPeriod {
 				started = time.Now()
-				osutil.Rename(mc.log, mc.log+".old")
+				os.Rename(mc.log, mc.log+".old")
 				logfile, err := os.Create(mc.log)
 				if err != nil {
 					mc.errorf("failed to create manager log: %v", err)

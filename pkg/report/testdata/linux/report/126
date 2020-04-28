@@ -1,5 +1,4 @@
 TITLE: memory leak in corrupted
-TYPE: LEAK
 CORRUPTED: Y
 
 2018/01/09 14:28:48 BUG: memory leak

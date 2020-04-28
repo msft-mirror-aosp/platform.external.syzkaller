@@ -17,18 +17,19 @@ import (
 )
 
 type fuchsia struct {
-	*config
-	obj string
+	obj     string
+	ignores []*regexp.Regexp
 }
 
 var (
-	zirconRIP          = regexp.MustCompile(` RIP: (0x[0-9a-f]+) `)
-	zirconBT           = regexp.MustCompile(`^bt#[0-9]+: (0x[0-9a-f]+)`)
-	zirconReportEnd    = []byte("Halted")
-	zirconAssertFailed = []byte("ASSERT FAILED at")
-	zirconLinePrefix   = regexp.MustCompile(`^\[\d+\.\d+\] \d+\.\d+> `)
-	zirconUnrelated    = []*regexp.Regexp{
-		regexp.MustCompile(`^$`),
+	zirconPanic      = []byte("ZIRCON KERNEL PANIC")
+	zirconPanicShort = []byte("KERNEL PANIC")
+	zirconKernelHang = []byte("stopping other cpus")
+	zirconRIP        = regexp.MustCompile(` RIP: (0x[0-9a-f]+) `)
+	zirconBT         = regexp.MustCompile(`^bt#[0-9]+: (0x[0-9a-f]+)`)
+	zirconReportEnd  = []byte("Halted")
+	zirconUnrelated  = []*regexp.Regexp{
+		regexp.MustCompile(`^\[\d+\.\d+\] \d+\.\d+`),
 		regexp.MustCompile(`stopping other cpus`),
 		regexp.MustCompile(`^halting cpu`),
 		regexp.MustCompile(`^dso: `),
@@ -36,14 +37,19 @@ var (
 		regexp.MustCompile(`^BUILDID `),
 		regexp.MustCompile(`^Halting\.\.\.`),
 	}
+	zirconSkip = []*regexp.Regexp{
+		regexp.MustCompile("^platform_halt$"),
+		regexp.MustCompile("^exception_die$"),
+		regexp.MustCompile("^_panic$"),
+	}
 )
 
-func ctorFuchsia(cfg *config) (Reporter, []string, error) {
+func ctorFuchsia(kernelSrc, kernelObj string, ignores []*regexp.Regexp) (Reporter, []string, error) {
 	ctx := &fuchsia{
-		config: cfg,
+		ignores: ignores,
 	}
-	if ctx.kernelObj != "" {
-		ctx.obj = filepath.Join(ctx.kernelObj, ctx.target.KernelObject)
+	if kernelObj != "" {
+		ctx.obj = filepath.Join(kernelObj, "zircon.elf")
 	}
 	suppressions := []string{
 		"fatal exception: process /tmp/syz-fuzzer", // OOM presumably
@@ -52,72 +58,70 @@ func ctorFuchsia(cfg *config) (Reporter, []string, error) {
 }
 
 func (ctx *fuchsia) ContainsCrash(output []byte) bool {
-	return containsCrash(output, zirconOopses, ctx.ignores)
+	return bytes.Contains(output, zirconPanic) ||
+		bytes.Contains(output, zirconKernelHang)
 }
 
 func (ctx *fuchsia) Parse(output []byte) *Report {
-	// We symbolize here because zircon output does not contain even function names.
-	symbolized := ctx.symbolize(output)
-	rep := simpleLineParser(symbolized, zirconOopses, zirconStackParams, ctx.ignores)
-	if rep == nil {
+	rep := &Report{
+		Output: output,
+		EndPos: len(output),
+	}
+	wantLocation := true
+	if pos := bytes.Index(output, zirconPanic); pos != -1 {
+		rep.Title = string(zirconPanicShort)
+		rep.StartPos = pos
+	} else if pos := bytes.Index(output, zirconKernelHang); pos != -1 {
+		rep.Title = string(zirconKernelHang)
+		rep.StartPos = pos
+		wantLocation = false // these tend to produce random locations
+	} else {
 		return nil
 	}
-	rep.Output = output
-	if report := ctx.shortenReport(rep.Report); len(report) != 0 {
-		rep.Report = report
+	symb := symbolizer.NewSymbolizer()
+	defer symb.Close()
+	where := ""
+	for s := bufio.NewScanner(bytes.NewReader(output[rep.StartPos:])); s.Scan(); {
+		line := s.Bytes()
+		if len(line) == 0 || matchesAny(line, zirconUnrelated) {
+			continue
+		}
+		if bytes.Equal(line, zirconReportEnd) {
+			break
+		}
+		if bytes.Contains(line, []byte("DEBUG ASSERT FAILED")) {
+			rep.Title = "ASSERT FAILED"
+		}
+		if bytes.Contains(line, []byte("Supervisor Page Fault exception")) {
+			rep.Title = "Supervisor fault"
+		}
+		if bytes.Contains(line, []byte("recursion in interrupt handler")) {
+			rep.Title = "recursion in interrupt handler"
+		}
+		if bytes.Contains(line, []byte("double fault")) {
+			rep.Title = "double fault"
+		}
+		if match := zirconRIP.FindSubmatchIndex(line); match != nil {
+			ctx.processPC(rep, symb, line, match, false, &where)
+		} else if match := zirconBT.FindSubmatchIndex(line); match != nil {
+			if ctx.processPC(rep, symb, line, match, true, &where) {
+				continue
+			}
+		}
+		rep.Report = append(rep.Report, line...)
+		rep.Report = append(rep.Report, '\n')
+	}
+	if wantLocation && where != "" {
+		rep.Title = fmt.Sprintf("%v in %v", rep.Title, where)
 	}
 	return rep
 }
 
-func (ctx *fuchsia) shortenReport(report []byte) []byte {
-	out := new(bytes.Buffer)
-	for s := bufio.NewScanner(bytes.NewReader(report)); s.Scan(); {
-		line := zirconLinePrefix.ReplaceAll(s.Bytes(), nil)
-		if matchesAny(line, zirconUnrelated) {
-			continue
-		}
-		if bytes.Contains(line, zirconReportEnd) {
-			break
-		}
-		out.Write(line)
-		out.WriteByte('\n')
+func (ctx *fuchsia) processPC(rep *Report, symb *symbolizer.Symbolizer,
+	line []byte, match []int, call bool, where *string) bool {
+	if ctx.obj == "" {
+		return false
 	}
-	return out.Bytes()
-}
-
-func (ctx *fuchsia) symbolize(output []byte) []byte {
-	symb := symbolizer.NewSymbolizer()
-	defer symb.Close()
-	out := new(bytes.Buffer)
-	for s := bufio.NewScanner(bytes.NewReader(output)); s.Scan(); {
-		line := s.Bytes()
-		if bytes.Contains(line, zirconAssertFailed) && len(line) == 127 {
-			// This is super hacky: but zircon splits the most important information in long assert lines
-			// (and they are always long) into several lines in irreversible way. Try to restore full line.
-			line = append([]byte{}, line...)
-			if s.Scan() {
-				line = append(line, s.Bytes()...)
-			}
-		}
-		if ctx.obj != "" {
-			if match := zirconRIP.FindSubmatchIndex(line); match != nil {
-				if ctx.processPC(out, symb, line, match, false) {
-					continue
-				}
-			} else if match := zirconBT.FindSubmatchIndex(line); match != nil {
-				if ctx.processPC(out, symb, line, match, true) {
-					continue
-				}
-			}
-		}
-		out.Write(line)
-		out.WriteByte('\n')
-	}
-	return out.Bytes()
-}
-
-func (ctx *fuchsia) processPC(out *bytes.Buffer, symb *symbolizer.Symbolizer,
-	line []byte, match []int, call bool) bool {
 	prefix := line[match[0]:match[1]]
 	pcStart := match[2] - match[0]
 	pcEnd := match[3] - match[0]
@@ -142,12 +146,16 @@ func (ctx *fuchsia) processPC(out *bytes.Buffer, symb *symbolizer.Symbolizer,
 			// demangle produces super long (full) names for lambdas.
 			name = "lambda"
 		}
+		if *where == "" && !matchesAny([]byte(name), zirconSkip) {
+			*where = name
+		}
 		id := "[ inline ]"
 		if !frame.Inline {
 			id = fmt.Sprintf("0x%08x", shortPC)
 		}
 		start := replace(append([]byte{}, prefix...), pcStart, pcEnd, []byte(id))
-		fmt.Fprintf(out, "%s %v %v:%v\n", start, name, file, frame.Line)
+		frameLine := fmt.Sprintf("%s %v %v:%v\n", start, name, file, frame.Line)
+		rep.Report = append(rep.Report, frameLine...)
 	}
 	return true
 }
@@ -167,166 +175,5 @@ func (ctx *fuchsia) trimFile(file string) string {
 }
 
 func (ctx *fuchsia) Symbolize(rep *Report) error {
-	// We symbolize in Parse because zircon stacktraces don't contain even function names.
 	return nil
-}
-
-var zirconStackParams = &stackParams{
-	frameRes: []*regexp.Regexp{
-		compile(` RIP: 0x[0-9a-f]{8} +([a-zA-Z0-9_:~]+)`),
-		compile(` RIP: \[ inline \] +([a-zA-Z0-9_:~]+)`),
-		compile(`^bt#[0-9]+: 0x[0-9a-f]{8} +([a-zA-Z0-9_:~]+)`),
-		compile(`^bt#[0-9]+: \[ inline \] +([a-zA-Z0-9_:~]+)`),
-	},
-	skipPatterns: []string{
-		"^platform_halt$",
-		"^exception_die$",
-		"^_panic$",
-	},
-}
-
-var zirconOopses = []*oops{
-	{
-		[]byte("ZIRCON KERNEL PANIC"),
-		[]oopsFormat{
-			{
-				title: compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*ASSERT FAILED(?:.*\\n)+?.*bt#00:"),
-				fmt:   "ASSERT FAILED in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						parseStackTrace,
-					},
-				},
-			},
-			{
-				// Some debug asserts don't contain stack trace.
-				title:        compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*ASSERT FAILED at \\(.+?\\): (.*)"),
-				fmt:          "ASSERT FAILED: %[1]v",
-				noStackTrace: true,
-			},
-			{
-				title: compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*double fault, halting(?:.*\\n)+?.*bt#00:"),
-				fmt:   "double fault in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						parseStackTrace,
-					},
-				},
-			},
-			{
-				// Some double faults don't contain stack trace.
-				title:        compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*double fault, halting"),
-				fmt:          "double fault",
-				noStackTrace: true,
-			},
-			{
-				title: compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*Supervisor Page Fault exception, halting"),
-				fmt:   "Supervisor Fault in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						parseStackTrace,
-					},
-				},
-			},
-			{
-				title: compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*recursion in interrupt handler"),
-				fmt:   "recursion in interrupt handler in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						parseStackTrace,
-					},
-				},
-			},
-			{
-				title:        compile("ZIRCON KERNEL PANIC(?:.*\\n)+?.*KVM internal error"),
-				fmt:          "KVM internal error",
-				noStackTrace: true,
-			},
-			{
-				title: compile("ZIRCON KERNEL PANIC"),
-				fmt:   "KERNEL PANIC in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						parseStackTrace,
-					},
-				},
-			},
-		},
-		[]*regexp.Regexp{},
-	},
-	{
-		[]byte("recursion in interrupt handler"),
-		[]oopsFormat{
-			{
-				title: compile("recursion in interrupt handler(?:.*\\n)+?.*(?:bt#00:|RIP:)"),
-				fmt:   "recursion in interrupt handler in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						parseStackTrace,
-					},
-				},
-			},
-			{
-				title:        compile("recursion in interrupt handler"),
-				fmt:          "recursion in interrupt handler",
-				noStackTrace: true,
-			},
-		},
-		[]*regexp.Regexp{},
-	},
-	// We should detect just "stopping other cpus" as some kernel crash rather then as "lost connection",
-	// but if we add oops for "stopping other cpus", then it will interfere with other formats,
-	// because "stopping other cpus" usually goes after "ZIRCON KERNEL PANIC", but sometimes before. Mess.
-	//{
-	//	[]byte("stopping other cpus"),
-	//},
-	{
-		[]byte("welcome to Zircon"),
-		[]oopsFormat{
-			{
-				title:        compile("welcome to Zircon"),
-				fmt:          unexpectedKernelReboot,
-				noStackTrace: true,
-			},
-		},
-		[]*regexp.Regexp{},
-	},
-	{
-		[]byte("KVM internal error"),
-		[]oopsFormat{
-			{
-				title:        compile("KVM internal error"),
-				fmt:          "KVM internal error",
-				noStackTrace: true,
-			},
-		},
-		[]*regexp.Regexp{},
-	},
-	{
-		[]byte("<== fatal exception"),
-		[]oopsFormat{
-			{
-				title:        compile("<== fatal exception"),
-				report:       compile("<== fatal exception: process ([a-zA-Z0-9_/-]+)"),
-				fmt:          "fatal exception in %[1]v",
-				noStackTrace: true,
-			},
-		},
-		[]*regexp.Regexp{
-			compile("<== fatal exception: process .+?syz.+?\\["),
-		},
-	},
-	{
-		// Panics in Go services.
-		[]byte("panic: "),
-		[]oopsFormat{
-			{
-				title:        compile("panic: .*"),
-				report:       compile("panic: (.*)(?:.*\\n)+?.* goroutine"),
-				fmt:          "panic: %[1]v",
-				noStackTrace: true,
-			},
-		},
-		[]*regexp.Regexp{},
-	},
 }

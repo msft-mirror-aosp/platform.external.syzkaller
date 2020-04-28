@@ -106,13 +106,9 @@ func MakeVmaPointerArg(t Type, addr, size uint64) *PointerArg {
 	}
 }
 
-func MakeSpecialPointerArg(t Type, index uint64) *PointerArg {
-	if index >= maxSpecialPointers {
-		panic("bad special pointer index")
-	}
+func MakeNullPointerArg(t Type) *PointerArg {
 	return &PointerArg{
 		ArgCommon: ArgCommon{typ: t},
-		Address:   -index,
 	}
 }
 
@@ -120,15 +116,8 @@ func (arg *PointerArg) Size() uint64 {
 	return arg.typ.Size()
 }
 
-func (arg *PointerArg) IsSpecial() bool {
-	return arg.VmaSize == 0 && arg.Res == nil && -arg.Address < maxSpecialPointers
-}
-
-func (target *Target) PhysicalAddr(arg *PointerArg) uint64 {
-	if arg.IsSpecial() {
-		return target.SpecialPointers[-arg.Address]
-	}
-	return target.DataOffset + arg.Address
+func (arg *PointerArg) IsNull() bool {
+	return arg.Address == 0 && arg.VmaSize == 0 && arg.Res == nil
 }
 
 // Used for BufferType.
@@ -164,13 +153,6 @@ func (arg *DataArg) Data() []byte {
 		panic("getting data of output data arg")
 	}
 	return arg.data
-}
-
-func (arg *DataArg) SetData(data []byte) {
-	if arg.Type().Dir() == DirOut {
-		panic("setting data of output data arg")
-	}
-	arg.data = append([]byte{}, data...)
 }
 
 // Used for StructType and ArrayType.
@@ -280,12 +262,17 @@ func (arg *ResultArg) Size() uint64 {
 
 // Returns inner arg for pointer args.
 func InnerArg(arg Arg) Arg {
-	if _, ok := arg.Type().(*PtrType); ok {
-		res := arg.(*PointerArg).Res
-		if res == nil {
-			return nil
+	if t, ok := arg.Type().(*PtrType); ok {
+		if a, ok := arg.(*PointerArg); ok {
+			if a.Res == nil {
+				if !t.Optional() {
+					panic(fmt.Sprintf("non-optional pointer is nil\narg: %+v\ntype: %+v", a, t))
+				}
+				return nil
+			}
+			return InnerArg(a.Res)
 		}
-		return InnerArg(res)
+		return nil // *ConstArg.
 	}
 	return arg // Not a pointer.
 }
@@ -371,7 +358,7 @@ func removeArg(arg0 Arg) {
 			delete(uses, a)
 		}
 		for arg1 := range a.uses {
-			arg2 := arg1.Type().DefaultArg().(*ResultArg)
+			arg2 := arg1.Type().makeDefaultArg().(*ResultArg)
 			replaceResultArg(arg1, arg2)
 		}
 	})

@@ -20,25 +20,24 @@ import (
 )
 
 var (
-	flagConfig = flag.String("config", "", "manager configuration file (manager.cfg)")
+	flagConfig = flag.String("config", "", "configuration file")
 	flagCount  = flag.Int("count", 0, "number of VMs to use (overrides config count param)")
 	flagDebug  = flag.Bool("debug", false, "print debug output")
 )
 
 func main() {
-	os.Args = append(append([]string{}, os.Args[0], "-vv=10"), os.Args[1:]...)
+	os.Args = append(append([]string{}, os.Args[0], "-v=10"), os.Args[1:]...)
 	flag.Parse()
-	if len(flag.Args()) != 1 || *flagConfig == "" {
-		log.Fatalf("usage: syz-repro -config=manager.cfg execution.log")
-	}
 	cfg, err := mgrconfig.LoadFile(*flagConfig)
 	if err != nil {
-		log.Fatalf("%v: %v", *flagConfig, err)
+		log.Fatalf("%v", err)
 	}
-	logFile := flag.Args()[0]
-	data, err := ioutil.ReadFile(logFile)
+	if len(flag.Args()) != 1 {
+		log.Fatalf("usage: syz-repro -config=config.file execution.log")
+	}
+	data, err := ioutil.ReadFile(flag.Args()[0])
 	if err != nil {
-		log.Fatalf("failed to open log file %v: %v", logFile, err)
+		log.Fatalf("failed to open log file: %v", err)
 	}
 	if _, err := prog.GetTarget(cfg.TargetOS, cfg.TargetArch); err != nil {
 		log.Fatalf("%v", err)

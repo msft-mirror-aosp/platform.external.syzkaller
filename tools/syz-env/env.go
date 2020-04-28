@@ -6,12 +6,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 
-	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/sys/targets"
 )
 
@@ -30,19 +28,7 @@ func main() {
 		Name string
 		Val  string
 	}
-	parallelism := runtime.NumCPU()
-	if mem := osutil.SystemMemorySize(); mem != 0 {
-		// Ensure that we have at least 1GB per Makefile job.
-		// Go compiler/linker can consume significant amount of memory
-		// (observed to consume at least 600MB). See #1276 for context.
-		memLimit := int(mem / (1 << 30))
-		if parallelism > memLimit {
-			parallelism = memLimit
-		}
-	}
 	vars := []Var{
-		{"BUILDOS", runtime.GOOS},
-		{"NATIVEBUILDOS", target.BuildOS},
 		{"HOSTOS", hostOS},
 		{"HOSTARCH", hostArch},
 		{"TARGETOS", targetOS},
@@ -50,14 +36,8 @@ func main() {
 		{"TARGETVMARCH", targetVMArch},
 		{"CC", target.CCompiler},
 		{"ADDCFLAGS", strings.Join(target.CrossCFlags, " ")},
-		{"NCORES", strconv.Itoa(parallelism)},
+		{"NCORES", strconv.Itoa(runtime.NumCPU())},
 		{"EXE", target.ExeExtension},
-		{"NATIVEBUILDOS", target.BuildOS},
-	}
-	if targetOS != runtime.GOOS {
-		if _, err := exec.LookPath(target.CCompiler); err != nil {
-			vars = append(vars, Var{"NO_CROSS_COMPILER", "yes"})
-		}
 	}
 	for _, v := range vars {
 		fmt.Printf("export %v=%v\\n", v.Name, v.Val)

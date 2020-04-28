@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -32,8 +31,10 @@ type Env struct {
 }
 
 func NewEnv(cfg *mgrconfig.Config) (*Env, error) {
-	if !vm.AllowsOvercommit(cfg.Type) {
-		return nil, fmt.Errorf("test instances are not supported for %v VMs", cfg.Type)
+	switch cfg.Type {
+	case "gce", "qemu", "gvisor":
+	default:
+		return nil, fmt.Errorf("test instances can only work with qemu/gce")
 	}
 	if cfg.Workdir == "" {
 		return nil, fmt.Errorf("workdir path is empty")
@@ -62,7 +63,7 @@ func (env *Env) BuildSyzkaller(repo, commit string) error {
 	if _, err := vcs.NewSyzkallerRepo(cfg.Syzkaller).CheckoutCommit(repo, commit); err != nil {
 		return fmt.Errorf("failed to checkout syzkaller repo: %v", err)
 	}
-	cmd := osutil.Command(MakeBin, "target")
+	cmd := osutil.Command("make", "target")
 	cmd.Dir = cfg.Syzkaller
 	cmd.Env = append([]string{}, os.Environ()...)
 	cmd.Env = append(cmd.Env,
@@ -70,11 +71,6 @@ func (env *Env) BuildSyzkaller(repo, commit string) error {
 		"TARGETOS="+cfg.TargetOS,
 		"TARGETVMARCH="+cfg.TargetVMArch,
 		"TARGETARCH="+cfg.TargetArch,
-		// Since we can be building very old revisions for bisection here,
-		// make the build as permissive as possible.
-		// Newer compilers tend to produce more warnings also kernel headers may be broken, e.g.:
-		// ebtables.h:197:19: error: invalid conversion from ‘void*’ to ‘ebt_entry_target*’
-		"CFLAGS=-fpermissive -w",
 	)
 	if _, err := osutil.Run(time.Hour, cmd); err != nil {
 		return fmt.Errorf("syzkaller build failed: %v", err)
@@ -82,69 +78,50 @@ func (env *Env) BuildSyzkaller(repo, commit string) error {
 	return nil
 }
 
-func (env *Env) BuildKernel(compilerBin, userspaceDir, cmdlineFile, sysctlFile string,
-	kernelConfig []byte) (string, error) {
+func (env *Env) BuildKernel(compilerBin, userspaceDir, cmdlineFile, sysctlFile string, kernelConfig []byte) error {
 	cfg := env.cfg
 	imageDir := filepath.Join(cfg.Workdir, "image")
 	if err := build.Image(cfg.TargetOS, cfg.TargetVMArch, cfg.Type,
 		cfg.KernelSrc, imageDir, compilerBin, userspaceDir,
 		cmdlineFile, sysctlFile, kernelConfig); err != nil {
-		return "", err
+		return err
 	}
-	if err := SetConfigImage(cfg, imageDir, true); err != nil {
-		return "", err
-	}
-	kernelConfigFile := filepath.Join(imageDir, "kernel.config")
-	if !osutil.IsExist(kernelConfigFile) {
-		kernelConfigFile = ""
-	}
-	return kernelConfigFile, nil
+	return SetConfigImage(cfg, imageDir)
 }
 
-func SetConfigImage(cfg *mgrconfig.Config, imageDir string, reliable bool) error {
+func SetConfigImage(cfg *mgrconfig.Config, imageDir string) error {
 	cfg.KernelObj = filepath.Join(imageDir, "obj")
 	cfg.Image = filepath.Join(imageDir, "image")
 	if keyFile := filepath.Join(imageDir, "key"); osutil.IsExist(keyFile) {
 		cfg.SSHKey = keyFile
 	}
-	vmConfig := make(map[string]interface{})
-	if err := json.Unmarshal(cfg.VM, &vmConfig); err != nil {
-		return fmt.Errorf("failed to parse VM config: %v", err)
-	}
-	if cfg.Type == "qemu" || cfg.Type == "vmm" {
-		if kernel := filepath.Join(imageDir, "kernel"); osutil.IsExist(kernel) {
-			vmConfig["kernel"] = kernel
+	if cfg.Type == "qemu" {
+		kernel := filepath.Join(imageDir, "kernel")
+		if !osutil.IsExist(kernel) {
+			kernel = ""
 		}
-		if initrd := filepath.Join(imageDir, "initrd"); osutil.IsExist(initrd) {
-			vmConfig["initrd"] = initrd
+		initrd := filepath.Join(imageDir, "initrd")
+		if !osutil.IsExist(initrd) {
+			initrd = ""
+		}
+		if kernel != "" || initrd != "" {
+			qemu := make(map[string]interface{})
+			if err := json.Unmarshal(cfg.VM, &qemu); err != nil {
+				return fmt.Errorf("failed to parse qemu config: %v", err)
+			}
+			if kernel != "" {
+				qemu["kernel"] = kernel
+			}
+			if initrd != "" {
+				qemu["initrd"] = initrd
+			}
+			vmCfg, err := json.Marshal(qemu)
+			if err != nil {
+				return fmt.Errorf("failed to serialize qemu config: %v", err)
+			}
+			cfg.VM = vmCfg
 		}
 	}
-	if cfg.Type == "gce" {
-		// Don't use preemptible VMs for image testing, patch testing and bisection.
-		vmConfig["preemptible"] = !reliable
-	}
-	vmCfg, err := json.Marshal(vmConfig)
-	if err != nil {
-		return fmt.Errorf("failed to serialize VM config: %v", err)
-	}
-	cfg.VM = vmCfg
-	return nil
-}
-
-func OverrideVMCount(cfg *mgrconfig.Config, n int) error {
-	vmConfig := make(map[string]interface{})
-	if err := json.Unmarshal(cfg.VM, &vmConfig); err != nil {
-		return fmt.Errorf("failed to parse VM config: %v", err)
-	}
-	if vmConfig["count"] == nil || !vm.AllowsOvercommit(cfg.Type) {
-		return nil
-	}
-	vmConfig["count"] = n
-	vmCfg, err := json.Marshal(vmConfig)
-	if err != nil {
-		return fmt.Errorf("failed to serialize VM config: %v", err)
-	}
-	cfg.VM = vmCfg
 	return nil
 }
 
@@ -225,27 +202,24 @@ func (inst *inst) test() error {
 		}
 		if bootErr, ok := err.(vm.BootErrorer); ok {
 			testErr.Title, testErr.Output = bootErr.BootError()
-			rep := inst.reporter.Parse(testErr.Output)
-			if rep != nil && rep.Type == report.UnexpectedReboot {
-				// Avoid detecting any boot crash as "unexpected kernel reboot".
-				output := testErr.Output[rep.EndPos:]
-				if pos := bytes.IndexByte(testErr.Output[rep.StartPos:], '\n'); pos != -1 {
-					output = testErr.Output[rep.StartPos+pos:]
-				}
-				rep = inst.reporter.Parse(output)
+			// This linux-ism avoids detecting any crash during boot as "unexpected kernel reboot".
+			output := testErr.Output
+			if pos := bytes.Index(output, []byte("Booting the kernel.")); pos != -1 {
+				output = output[pos+1:]
 			}
-			if rep == nil {
-				rep = &report.Report{
+			testErr.Report = inst.reporter.Parse(output)
+			if testErr.Report != nil {
+				testErr.Title = testErr.Report.Title
+			} else {
+				testErr.Report = &report.Report{
 					Title:  testErr.Title,
 					Output: testErr.Output,
 				}
 			}
-			if err := inst.reporter.Symbolize(rep); err != nil {
+			if err := inst.reporter.Symbolize(testErr.Report); err != nil {
 				// TODO(dvyukov): send such errors to dashboard.
 				log.Logf(0, "failed to symbolize report: %v", err)
 			}
-			testErr.Report = rep
-			testErr.Title = rep.Title
 		}
 		return testErr
 	}
@@ -292,13 +266,13 @@ func (inst *inst) testInstance() error {
 		return &TestError{Title: fmt.Sprintf("failed to copy test binary to VM: %v", err)}
 	}
 
-	cmd := OldFuzzerCmd(fuzzerBin, executorBin, "test", inst.cfg.TargetOS, inst.cfg.TargetArch, fwdAddr,
-		inst.cfg.Sandbox, 0, inst.cfg.Cover, true)
-	outc, errc, err := inst.vm.Run(10*time.Minute, nil, cmd)
+	cmd := FuzzerCmd(fuzzerBin, executorBin, "test", inst.cfg.TargetOS, inst.cfg.TargetArch, fwdAddr,
+		inst.cfg.Sandbox, 0, 0, false, false, true, false)
+	outc, errc, err := inst.vm.Run(5*time.Minute, nil, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to run binary in VM: %v", err)
 	}
-	rep := inst.vm.MonitorExecution(outc, errc, inst.reporter, vm.ExitNormal)
+	rep := inst.vm.MonitorExecution(outc, errc, inst.reporter, true)
 	if rep != nil {
 		if err := inst.reporter.Symbolize(rep); err != nil {
 			// TODO(dvyukov): send such errors to dashboard.
@@ -361,11 +335,10 @@ func (inst *inst) testRepro() error {
 	if err != nil {
 		return err
 	}
-	bin, err := csource.BuildNoWarn(target, inst.reproC)
+	bin, err := csource.Build(target, inst.reproC)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(bin)
 	vmBin, err := inst.vm.Copy(bin)
 	if err != nil {
 		return &TestError{Title: fmt.Sprintf("failed to copy test binary to VM: %v", err)}
@@ -380,8 +353,7 @@ func (inst *inst) testProgram(command string, testTime time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("failed to run binary in VM: %v", err)
 	}
-	rep := inst.vm.MonitorExecution(outc, errc, inst.reporter,
-		vm.ExitTimeout|vm.ExitNormal|vm.ExitError)
+	rep := inst.vm.MonitorExecution(outc, errc, inst.reporter, true)
 	if rep == nil {
 		return nil
 	}
@@ -394,29 +366,16 @@ func (inst *inst) testProgram(command string, testTime time.Duration) error {
 func FuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox string, procs, verbosity int,
 	cover, debug, test, runtest bool) string {
 	osArg := ""
-	switch OS {
-	case "akaros", "fuchsia":
+	if OS == "akaros" {
 		// Only akaros needs OS, because the rest assume host OS.
 		// But speciying OS for all OSes breaks patch testing on syzbot
 		// because old execprog does not have os flag.
 		osArg = " -os=" + OS
 	}
-	runtestArg := ""
-	if runtest {
-		runtestArg = " -runtest"
-	}
-	verbosityArg := ""
-	if verbosity != 0 {
-		verbosityArg = fmt.Sprintf(" -vv=%v", verbosity)
-	}
 	return fmt.Sprintf("%v -executor=%v -name=%v -arch=%v%v -manager=%v -sandbox=%v"+
-		" -procs=%v -cover=%v -debug=%v -test=%v%v%v",
+		" -procs=%v -v=%d -cover=%v -debug=%v -test=%v -runtest=%v",
 		fuzzer, executor, name, arch, osArg, fwdAddr, sandbox,
-		procs, cover, debug, test, runtestArg, verbosityArg)
-}
-
-func OldFuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox string, procs int, cover, test bool) string {
-	return FuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox, procs, 0, cover, false, test, false)
+		procs, verbosity, cover, debug, test, runtest)
 }
 
 func ExecprogCmd(execprog, executor, OS, arch, sandbox string, repeat, threaded, collide bool,
@@ -426,8 +385,7 @@ func ExecprogCmd(execprog, executor, OS, arch, sandbox string, repeat, threaded,
 		repeatCount = 0
 	}
 	osArg := ""
-	switch OS {
-	case "akaros", "fuchsia":
+	if OS == "akaros" {
 		osArg = " -os=" + OS
 	}
 	return fmt.Sprintf("%v -executor=%v -arch=%v%v -sandbox=%v"+
@@ -437,10 +395,3 @@ func ExecprogCmd(execprog, executor, OS, arch, sandbox string, repeat, threaded,
 		procs, repeatCount, threaded, collide,
 		faultCall, faultNth, progFile)
 }
-
-var MakeBin = func() string {
-	if runtime.GOOS == "freebsd" || runtime.GOOS == "openbsd" {
-		return "gmake"
-	}
-	return "make"
-}()

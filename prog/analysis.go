@@ -15,7 +15,6 @@ import (
 type state struct {
 	target    *Target
 	ct        *ChoiceTable
-	corpus    []*Prog
 	files     map[string]bool
 	resources map[string][]*ResultArg
 	strings   map[string]bool
@@ -24,8 +23,8 @@ type state struct {
 }
 
 // analyze analyzes the program p up to but not including call c.
-func analyze(ct *ChoiceTable, corpus []*Prog, p *Prog, c *Call) *state {
-	s := newState(p.Target, ct, corpus)
+func analyze(ct *ChoiceTable, p *Prog, c *Call) *state {
+	s := newState(p.Target, ct)
 	resources := true
 	for _, c1 := range p.Calls {
 		if c1 == c {
@@ -36,11 +35,10 @@ func analyze(ct *ChoiceTable, corpus []*Prog, p *Prog, c *Call) *state {
 	return s
 }
 
-func newState(target *Target, ct *ChoiceTable, corpus []*Prog) *state {
+func newState(target *Target, ct *ChoiceTable) *state {
 	s := &state{
 		target:    target,
 		ct:        ct,
-		corpus:    corpus,
 		files:     make(map[string]bool),
 		resources: make(map[string][]*ResultArg),
 		strings:   make(map[string]bool),
@@ -59,10 +57,10 @@ func (s *state) analyzeImpl(c *Call, resources bool) {
 		switch a := arg.(type) {
 		case *PointerArg:
 			switch {
-			case a.IsSpecial():
+			case a.IsNull():
 			case a.VmaSize != 0:
 				s.va.noteAlloc(a.Address/s.target.PageSize, a.VmaSize/s.target.PageSize)
-			case a.Res != nil:
+			default:
 				s.ma.noteAlloc(a.Address, a.Res.Size())
 			}
 		}
@@ -85,7 +83,7 @@ func (s *state) analyzeImpl(c *Call, resources bool) {
 				case BufferString:
 					s.strings[val] = true
 				case BufferFilename:
-					if len(val) < 3 || escapingFilename(val) {
+					if len(val) < 3 {
 						// This is not our file, probalby one of specialFiles.
 						return
 					}
@@ -211,10 +209,6 @@ func (p *Prog) FallbackSignal(info []CallInfo) {
 		if inf.Errno != 0 {
 			continue
 		}
-		if c.Meta.CallName == "seccomp" {
-			// seccomp filter can produce arbitrary errno values for subsequent syscalls. Don't trust anything afterwards.
-			break
-		}
 		ForeachArg(c, func(arg Arg, _ *ArgCtx) {
 			if a, ok := arg.(*ResultArg); ok {
 				resources[a] = c
@@ -224,62 +218,57 @@ func (p *Prog) FallbackSignal(info []CallInfo) {
 		// deeper arguments can produce too much false signal.
 		flags := 0
 		for _, arg := range c.Args {
-			flags = extractArgSignal(arg, id, flags, inf, resources)
+			switch a := arg.(type) {
+			case *ResultArg:
+				flags <<= 1
+				if a.Res != nil {
+					ctor := resources[a.Res]
+					if ctor != nil {
+						inf.Signal = append(inf.Signal,
+							encodeFallbackSignal(fallbackSignalCtor, id, ctor.Meta.ID))
+					}
+				} else {
+					if a.Val != a.Type().(*ResourceType).SpecialValues()[0] {
+						flags |= 1
+					}
+				}
+			case *ConstArg:
+				const width = 3
+				flags <<= width
+				switch typ := a.Type().(type) {
+				case *FlagsType:
+					if typ.BitMask {
+						for i, v := range typ.Vals {
+							if a.Val&v != 0 {
+								flags ^= 1 << (uint(i) % width)
+							}
+						}
+					} else {
+						for i, v := range typ.Vals {
+							if a.Val == v {
+								flags |= i % (1 << width)
+								break
+							}
+						}
+					}
+				case *LenType:
+					flags <<= 1
+					if a.Val == 0 {
+						flags |= 1
+					}
+				}
+			case *PointerArg:
+				flags <<= 1
+				if a.IsNull() {
+					flags |= 1
+				}
+			}
 		}
 		if flags != 0 {
 			inf.Signal = append(inf.Signal,
 				encodeFallbackSignal(fallbackSignalFlags, id, flags))
 		}
 	}
-}
-
-func extractArgSignal(arg Arg, callID, flags int, inf *CallInfo, resources map[*ResultArg]*Call) int {
-	switch a := arg.(type) {
-	case *ResultArg:
-		flags <<= 1
-		if a.Res != nil {
-			ctor := resources[a.Res]
-			if ctor != nil {
-				inf.Signal = append(inf.Signal,
-					encodeFallbackSignal(fallbackSignalCtor, callID, ctor.Meta.ID))
-			}
-		} else {
-			if a.Val != a.Type().(*ResourceType).SpecialValues()[0] {
-				flags |= 1
-			}
-		}
-	case *ConstArg:
-		const width = 3
-		flags <<= width
-		switch typ := a.Type().(type) {
-		case *FlagsType:
-			if typ.BitMask {
-				for i, v := range typ.Vals {
-					if a.Val&v != 0 {
-						flags ^= 1 << (uint(i) % width)
-					}
-				}
-			} else {
-				for i, v := range typ.Vals {
-					if a.Val == v {
-						flags |= i % (1 << width)
-						break
-					}
-				}
-			}
-		case *LenType:
-			flags <<= 1
-			if a.Val == 0 {
-				flags |= 1
-			}
-		}
-	case *PointerArg:
-		flags <<= 1
-		if a.IsSpecial() {
-			flags |= 1
-		}
-	}
-	return flags
 }
 
 func DecodeFallbackSignal(s uint32) (callID, errno int) {

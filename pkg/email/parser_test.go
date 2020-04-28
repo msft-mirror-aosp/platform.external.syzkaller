@@ -15,16 +15,16 @@ import (
 func TestExtractCommand(t *testing.T) {
 	for i, test := range extractCommandTests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			cmd, str, args := extractCommand(test.body)
-			if cmd != test.cmd || str != test.str || !reflect.DeepEqual(args, test.args) {
-				t.Logf("expect: %v %q %q", test.cmd, test.str, test.args)
-				t.Logf("got   : %v %q %q", cmd, str, args)
+			cmd, args := extractCommand([]byte(test.body))
+			if cmd != test.cmd || !reflect.DeepEqual(args, test.args) {
+				t.Logf("expect: %q %q", test.cmd, test.args)
+				t.Logf("got   : %q %q", cmd, args)
 				t.Fail()
 			}
-			cmd, str, args = extractCommand(strings.Replace(test.body, "\n", "\r\n", -1))
-			if cmd != test.cmd || str != test.str || !reflect.DeepEqual(args, test.args) {
-				t.Logf("expect: %v %q %q", test.cmd, test.str, test.args)
-				t.Logf("got   : %v %q %q", cmd, str, args)
+			cmd, args = extractCommand([]byte(strings.Replace(test.body, "\n", "\r\n", -1)))
+			if cmd != test.cmd || !reflect.DeepEqual(args, test.args) {
+				t.Logf("expect: %q %q", test.cmd, test.args)
+				t.Logf("got   : %q %q", cmd, args)
 				t.Fail()
 			}
 		})
@@ -138,8 +138,7 @@ func TestParse(t *testing.T) {
 
 var extractCommandTests = []struct {
 	body string
-	cmd  Command
-	str  string
+	cmd  string
 	args string
 }{
 	{
@@ -147,19 +146,17 @@ var extractCommandTests = []struct {
 
 line1
 #syz  fix:  bar baz 	`,
-		cmd:  CmdFix,
-		str:  "fix:",
+		cmd:  "fix:",
 		args: "bar baz",
 	},
 	{
 		body: `Hello,
 
 line1
-#syz fix  bar  	 baz
+#syz fix:  bar  	 baz
 line 2
 `,
-		cmd: CmdFix,
-		str: "fix",
+		cmd: "fix:",
 		args: "bar  	 baz",
 	},
 	{
@@ -168,7 +165,7 @@ line1
 > #syz fix: bar   baz
 line 2
 `,
-		cmd:  CmdNone,
+		cmd:  "",
 		args: "",
 	},
 	// This is unfortunate case when a command is split by email client
@@ -178,17 +175,15 @@ line 2
 #syz test: git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git
 locking/core
 `,
-		cmd:  CmdTest,
-		str:  "test:",
+		cmd:  "test:",
 		args: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core",
 	},
 	{
 		body: `
-#syz test
+#syz test:
 git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core
 `,
-		cmd:  CmdTest,
-		str:  "test",
+		cmd:  "test:",
 		args: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core",
 	},
 	{
@@ -198,8 +193,7 @@ git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git
 locking/core
 locking/core
 `,
-		cmd:  CmdTest,
-		str:  "test:",
+		cmd:  "test:",
 		args: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core",
 	},
 	{
@@ -211,16 +205,14 @@ locking/core
 arg4
 arg5
 `,
-		cmd:  cmdTest5,
-		str:  "test_5_arg_cmd",
+		cmd:  "test_5_arg_cmd",
 		args: "arg1 arg2 arg3 arg4 arg5",
 	},
 	{
 		body: `
 #syz test_5_arg_cmd arg1
 arg2`,
-		cmd:  cmdTest5,
-		str:  "test_5_arg_cmd",
+		cmd:  "test_5_arg_cmd",
 		args: "arg1 arg2",
 	},
 	{
@@ -228,8 +220,7 @@ arg2`,
 #syz test_5_arg_cmd arg1
 arg2
 `,
-		cmd:  cmdTest5,
-		str:  "test_5_arg_cmd",
+		cmd:  "test_5_arg_cmd",
 		args: "arg1 arg2",
 	},
 	{
@@ -239,8 +230,7 @@ arg2
 
  
 `,
-		cmd:  cmdTest5,
-		str:  "test_5_arg_cmd",
+		cmd:  "test_5_arg_cmd",
 		args: "arg1 arg2",
 	},
 	{
@@ -250,8 +240,7 @@ arg1 arg2 arg3
 arg4 arg5
  
 `,
-		cmd:  CmdFix,
-		str:  "fix:",
+		cmd:  "fix:",
 		args: "arg1 arg2 arg3",
 	},
 	{
@@ -259,36 +248,8 @@ arg4 arg5
 #syz  fix: arg1 arg2 arg3
 arg4 arg5 
 `,
-		cmd:  CmdFix,
-		str:  "fix:",
+		cmd:  "fix:",
 		args: "arg1 arg2 arg3",
-	},
-	{
-		body: `
-#syz dup: title goes here
-baz
-`,
-		cmd:  CmdDup,
-		str:  "dup:",
-		args: "title goes here",
-	},
-	{
-		body: `
-#syz dup 
-title on the next line goes here  
-but not this one
-`,
-		cmd:  CmdDup,
-		str:  "dup",
-		args: "title on the next line goes here",
-	},
-	{
-		body: `
-#syz foo bar
-baz
-`,
-		cmd: CmdUnknown,
-		str: "foo",
 	},
 }
 
@@ -334,8 +295,7 @@ To post to this group, send email to syzkaller@googlegroups.com.
 To view this discussion on the web visit https://groups.google.com/d/msgid/syzkaller/abcdef@google.com.
 For more options, visit https://groups.google.com/d/optout.`,
 			Patch:       "",
-			Command:     CmdFix,
-			CommandStr:  "fix:",
+			Command:     "fix:",
 			CommandArgs: "arg1 arg2 arg3",
 		}},
 
@@ -356,8 +316,7 @@ last line`,
 			Cc:        []string{"bob@example.com"},
 			Body: `text body
 last line`,
-			Patch:   "",
-			Command: CmdNone,
+			Patch: "",
 		}},
 
 	{`Date: Sun, 7 May 2017 19:54:00 -0700
@@ -380,8 +339,7 @@ text body
 second line
 last line`,
 			Patch:       "",
-			Command:     CmdInvalid,
-			CommandStr:  "invalid",
+			Command:     "invalid",
 			CommandArgs: "",
 		}},
 
@@ -405,9 +363,9 @@ last line
 second line
 last line
 #syz command`,
-			Patch:      "",
-			Command:    CmdUnknown,
-			CommandStr: "command",
+			Patch:       "",
+			Command:     "command",
+			CommandArgs: "",
 		}},
 
 	{`Date: Sun, 7 May 2017 19:54:00 -0700
@@ -444,9 +402,7 @@ IHQpKSB7CiAJCXNwaW5fdW5sb2NrKCZrY292LT5sb2NrKTsKIAkJcmV0dXJuOwo=
 			Body: `body text
 >#syz test
 `,
-			Patch: `diff --git a/kernel/kcov.c b/kernel/kcov.c
-index 85e5546cd791..949ea4574412 100644
---- a/kernel/kcov.c
+			Patch: `--- a/kernel/kcov.c
 +++ b/kernel/kcov.c
 @@ -127,7 +127,6 @@ void kcov_task_exit(struct task_struct *t)
  	kcov = t->kcov;
@@ -457,7 +413,7 @@ index 85e5546cd791..949ea4574412 100644
  		spin_unlock(&kcov->lock);
  		return;
 `,
-			Command:     CmdNone,
+			Command:     "",
 			CommandArgs: "",
 		}},
 
@@ -555,9 +511,7 @@ index 3d85747bd86e..a257b872a53d 100644
   error = vfs_statx(dfd, filename, flags, &stat, mask);
   if (error)
 `,
-			Patch: `diff --git a/fs/stat.c b/fs/stat.c
-index 3d85747bd86e..a257b872a53d 100644
---- a/fs/stat.c
+			Patch: `--- a/fs/stat.c
 +++ b/fs/stat.c
 @@ -567,8 +567,6 @@ SYSCALL_DEFINE5(statx,
   return -EINVAL;
@@ -569,9 +523,8 @@ index 3d85747bd86e..a257b872a53d 100644
   error = vfs_statx(dfd, filename, flags, &stat, mask);
   if (error)
 `,
-			Command:     CmdTest,
-			CommandStr:  "test",
-			CommandArgs: "commit 59372bbf3abd5b24a7f6f676a3968685c280f955",
+			Command:     "test",
+			CommandArgs: "",
 		}},
 
 	{`Sender: syzkaller-bugs@googlegroups.com
@@ -618,61 +571,7 @@ d
 
 #syz dup: BUG: unable to handle kernel NULL pointer dereference in corrupted
 `,
-		Command:     CmdDup,
-		CommandStr:  "dup:",
+		Command:     "dup:",
 		CommandArgs: "BUG: unable to handle kernel NULL pointer dereference in corrupted",
 	}},
-
-	{`Sender: syzkaller-bugs@googlegroups.com
-To: syzbot <syzbot+6dd701dc797b23b8c761@syzkaller.appspotmail.com>
-From: bar@foo.com
-
-#syz dup:
-BUG: unable to handle kernel NULL pointer dereference in corrupted
-`, Email{
-		From: "<bar@foo.com>",
-		Cc:   []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		Body: `#syz dup:
-BUG: unable to handle kernel NULL pointer dereference in corrupted
-`,
-		Command:     CmdDup,
-		CommandStr:  "dup:",
-		CommandArgs: "BUG: unable to handle kernel NULL pointer dereference in corrupted",
-	}},
-
-	{`Sender: syzkaller-bugs@googlegroups.com
-To: syzbot <syzbot+6dd701dc797b23b8c761@syzkaller.appspotmail.com>
-From: bar@foo.com
-
-#syz fix:
-When freeing a lockf struct that already is part of a linked list, make sure to
-`, Email{
-		From: "<bar@foo.com>",
-		Cc:   []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		Body: `#syz fix:
-When freeing a lockf struct that already is part of a linked list, make sure to
-`,
-		Command:     CmdFix,
-		CommandStr:  "fix:",
-		CommandArgs: "When freeing a lockf struct that already is part of a linked list, make sure to",
-	}},
-
-	{`Date: Sun, 7 May 2017 19:54:00 -0700
-Message-ID: <123>
-Subject: #syz test: git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git master
-From: bob@example.com
-To: syzbot <foo+4564456@bar.com>
-
-nothing to see here`,
-		Email{
-			BugID:       "4564456",
-			MessageID:   "<123>",
-			Subject:     "#syz test: git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git master",
-			From:        "<bob@example.com>",
-			Cc:          []string{"bob@example.com"},
-			Body:        `nothing to see here`,
-			Command:     CmdTest,
-			CommandStr:  "test:",
-			CommandArgs: "git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git master",
-		}},
 }

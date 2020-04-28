@@ -8,13 +8,12 @@ import (
 )
 
 type Syscall struct {
-	ID          int
-	NR          uint64 // kernel syscall number
-	Name        string
-	CallName    string
-	MissingArgs int // number of trailing args that should be zero-filled
-	Args        []Type
-	Ret         Type
+	ID       int
+	NR       uint64 // kernel syscall number
+	Name     string
+	CallName string
+	Args     []Type
+	Ret      Type
 }
 
 type Dir int
@@ -61,11 +60,10 @@ type Type interface {
 	BitfieldLength() uint64
 	BitfieldMiddle() bool // returns true for all but last bitfield in a group
 
-	DefaultArg() Arg
+	makeDefaultArg() Arg
 	isDefaultArg(arg Arg) bool
 	generate(r *randGen, s *state) (arg Arg, calls []*Call)
 	mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool)
-	getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool)
 	minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool
 }
 
@@ -133,12 +131,6 @@ type ResourceDesc struct {
 	Type   Type
 	Kind   []string
 	Values []uint64
-	Ctors  []ResourceCtor
-}
-
-type ResourceCtor struct {
-	Call    int // Index in Target.Syscalls
-	Precise bool
 }
 
 type ResourceType struct {
@@ -151,7 +143,7 @@ func (t *ResourceType) String() string {
 	return t.Name()
 }
 
-func (t *ResourceType) DefaultArg() Arg {
+func (t *ResourceType) makeDefaultArg() Arg {
 	return MakeResultArg(t, nil, t.Default())
 }
 
@@ -207,7 +199,7 @@ type ConstType struct {
 	IsPad bool
 }
 
-func (t *ConstType) DefaultArg() Arg {
+func (t *ConstType) makeDefaultArg() Arg {
 	return MakeConstArg(t, t.Val)
 }
 
@@ -237,7 +229,7 @@ type IntType struct {
 	RangeEnd   uint64
 }
 
-func (t *IntType) DefaultArg() Arg {
+func (t *IntType) makeDefaultArg() Arg {
 	return MakeConstArg(t, 0)
 }
 
@@ -251,7 +243,7 @@ type FlagsType struct {
 	BitMask bool
 }
 
-func (t *FlagsType) DefaultArg() Arg {
+func (t *FlagsType) makeDefaultArg() Arg {
 	return MakeConstArg(t, 0)
 }
 
@@ -262,11 +254,10 @@ func (t *FlagsType) isDefaultArg(arg Arg) bool {
 type LenType struct {
 	IntTypeCommon
 	BitSize uint64 // want size in multiple of bits instead of array size
-	Offset  bool   // offset from the beginning of the parent struct or base object
-	Path    []string
+	Buf     string
 }
 
-func (t *LenType) DefaultArg() Arg {
+func (t *LenType) makeDefaultArg() Arg {
 	return MakeConstArg(t, 0)
 }
 
@@ -285,7 +276,7 @@ const (
 	procDefaultValue = 0xffffffffffffffff // special value denoting 0 for all procs
 )
 
-func (t *ProcType) DefaultArg() Arg {
+func (t *ProcType) makeDefaultArg() Arg {
 	return MakeConstArg(t, procDefaultValue)
 }
 
@@ -311,7 +302,7 @@ func (t *CsumType) String() string {
 	return "csum"
 }
 
-func (t *CsumType) DefaultArg() Arg {
+func (t *CsumType) makeDefaultArg() Arg {
 	return MakeConstArg(t, 0)
 }
 
@@ -329,13 +320,12 @@ func (t *VmaType) String() string {
 	return "vma"
 }
 
-func (t *VmaType) DefaultArg() Arg {
-	return MakeSpecialPointerArg(t, 0)
+func (t *VmaType) makeDefaultArg() Arg {
+	return MakeNullPointerArg(t)
 }
 
 func (t *VmaType) isDefaultArg(arg Arg) bool {
-	a := arg.(*PointerArg)
-	return a.IsSpecial() && a.Address == 0
+	return arg.(*PointerArg).IsNull()
 }
 
 type BufferKind int
@@ -351,8 +341,7 @@ const (
 type TextKind int
 
 const (
-	TextTarget TextKind = iota
-	TextX86Real
+	TextX86Real TextKind = iota
 	TextX86bit16
 	TextX86bit32
 	TextX86bit64
@@ -374,7 +363,7 @@ func (t *BufferType) String() string {
 	return "buffer"
 }
 
-func (t *BufferType) DefaultArg() Arg {
+func (t *BufferType) makeDefaultArg() Arg {
 	if t.Dir() == DirOut {
 		var sz uint64
 		if !t.Varlen() {
@@ -427,11 +416,11 @@ func (t *ArrayType) String() string {
 	return fmt.Sprintf("array[%v]", t.Type.String())
 }
 
-func (t *ArrayType) DefaultArg() Arg {
+func (t *ArrayType) makeDefaultArg() Arg {
 	var elems []Arg
 	if t.Kind == ArrayRangeLen && t.RangeBegin == t.RangeEnd {
 		for i := uint64(0); i < t.RangeBegin; i++ {
-			elems = append(elems, t.Type.DefaultArg())
+			elems = append(elems, t.Type.makeDefaultArg())
 		}
 	}
 	return MakeGroupArg(t, elems)
@@ -459,19 +448,19 @@ func (t *PtrType) String() string {
 	return fmt.Sprintf("ptr[%v, %v]", t.Dir(), t.Type.String())
 }
 
-func (t *PtrType) DefaultArg() Arg {
+func (t *PtrType) makeDefaultArg() Arg {
 	if t.Optional() {
-		return MakeSpecialPointerArg(t, 0)
+		return MakeNullPointerArg(t)
 	}
-	return MakePointerArg(t, 0, t.Type.DefaultArg())
+	return MakePointerArg(t, 0, t.Type.makeDefaultArg())
 }
 
 func (t *PtrType) isDefaultArg(arg Arg) bool {
 	a := arg.(*PointerArg)
 	if t.Optional() {
-		return a.IsSpecial() && a.Address == 0
+		return a.IsNull()
 	}
-	return a.Address == 0 && a.Res != nil && isDefault(a.Res)
+	return a.Address == 0 && isDefault(a.Res)
 }
 
 type StructType struct {
@@ -488,10 +477,10 @@ func (t *StructType) FieldName() string {
 	return t.FldName
 }
 
-func (t *StructType) DefaultArg() Arg {
+func (t *StructType) makeDefaultArg() Arg {
 	inner := make([]Arg, len(t.Fields))
 	for i, field := range t.Fields {
-		inner[i] = field.DefaultArg()
+		inner[i] = field.makeDefaultArg()
 	}
 	return MakeGroupArg(t, inner)
 }
@@ -520,8 +509,8 @@ func (t *UnionType) FieldName() string {
 	return t.FldName
 }
 
-func (t *UnionType) DefaultArg() Arg {
-	return MakeUnionArg(t, t.Fields[0].DefaultArg())
+func (t *UnionType) makeDefaultArg() Arg {
+	return MakeUnionArg(t, t.Fields[0].makeDefaultArg())
 }
 
 func (t *UnionType) isDefaultArg(arg Arg) bool {

@@ -36,7 +36,6 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 	if cmd.Stderr == nil {
 		cmd.Stderr = output
 	}
-	setPdeathsig(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start %v %+v: %v", cmd.Path, cmd.Args, err)
 	}
@@ -47,7 +46,6 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 		select {
 		case <-timer.C:
 			timedout <- true
-			killPgroup(cmd)
 			cmd.Process.Kill()
 		case <-done:
 			timedout <- false
@@ -61,7 +59,7 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 		if <-timedout {
 			text = fmt.Sprintf("timedout %q", cmd.Args)
 		}
-		return output.Bytes(), &VerboseError{
+		return nil, &VerboseError{
 			Title:  text,
 			Output: output.Bytes(),
 		}
@@ -198,8 +196,10 @@ func WriteFile(filename string, data []byte) error {
 }
 
 func WriteExecFile(filename string, data []byte) error {
-	os.Remove(filename)
-	return ioutil.WriteFile(filename, data, DefaultExecPerm)
+	if err := ioutil.WriteFile(filename, data, DefaultExecPerm); err != nil {
+		return err
+	}
+	return os.Chmod(filename, DefaultExecPerm)
 }
 
 // TempFile creates a unique temp filename.

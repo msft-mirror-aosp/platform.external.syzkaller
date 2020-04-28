@@ -73,11 +73,9 @@ func (comp *compiler) extractConsts() map[string]*ConstInfo {
 							info := getConstInfo(infos, arg.Pos)
 							info.consts[arg.Ident] = true
 						}
-						for _, col := range arg.Colon {
-							if col.Ident != "" {
-								info := getConstInfo(infos, col.Pos)
-								info.consts[col.Ident] = true
-							}
+						if arg.Ident2 != "" {
+							info := getConstInfo(infos, arg.Pos2)
+							info.consts[arg.Ident2] = true
 						}
 					}
 				}
@@ -185,9 +183,9 @@ func (comp *compiler) patchConsts(consts map[string]uint64) {
 				for i, arg := range args {
 					if desc.Args[i].Type.Kind == kindInt {
 						comp.patchIntConst(&arg.Value, &arg.Ident, consts, &missing)
-						for _, col := range arg.Colon {
-							comp.patchIntConst(&col.Value,
-								&col.Ident, consts, &missing)
+						if arg.HasColon {
+							comp.patchIntConst(&arg.Value2,
+								&arg.Ident2, consts, &missing)
 						}
 					}
 				}
@@ -210,12 +208,9 @@ func (comp *compiler) patchConsts(consts map[string]uint64) {
 			}
 			// Produce a warning about unsupported syscall/resource/struct.
 			// TODO(dvyukov): we should transitively remove everything that
-			// depends on unsupported things. Potentially we still can get,
-			// say, a bad int range error due to the wrong const value.
-			// However, if we have a union where one of the options is
-			// arch-specific and does not have a const value, it's probably
-			// better to remove just that option. But then if we get to 0
-			// options in the union, we still need to remove it entirely.
+			// depends on unsupported things.
+			// Potentially we still can get, say, a bad int range error
+			// due to the 0 const value.
 			pos, typ, name := decl.Info()
 			if id := typ + " " + name; !comp.unsupported[id] {
 				comp.unsupported[id] = true
@@ -233,18 +228,14 @@ func (comp *compiler) patchIntConst(val *uint64, id *string, consts map[string]u
 	if *id == "" {
 		return true
 	}
-	if v, ok := consts[*id]; ok {
-		*id = ""
-		*val = v
-		return true
+	v, ok := consts[*id]
+	if !ok {
+		if missing != nil && *missing == "" {
+			*missing = *id
+		}
 	}
-	if missing != nil && *missing == "" {
-		*missing = *id
-	}
-	// 1 is slightly safer than 0 and allows to work-around e.g. an array size
-	// that comes from a const missing on an arch. Also see the TODO in patchConsts.
-	*val = 1
-	return false
+	*val = v
+	return ok
 }
 
 func SerializeConsts(consts map[string]uint64, undeclared map[string]bool) []byte {

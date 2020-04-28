@@ -4,6 +4,7 @@
 package email
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -24,28 +25,11 @@ type Email struct {
 	Subject     string
 	From        string
 	Cc          []string
-	Body        string  // text/plain part
-	Patch       string  // attached patch, if any
-	Command     Command // command to bot
-	CommandStr  string  // string representation of the command
-	CommandArgs string  // arguments for the command
+	Body        string // text/plain part
+	Patch       string // attached patch, if any
+	Command     string // command to bot (#syz is stripped)
+	CommandArgs string // arguments for the command
 }
-
-type Command int
-
-const (
-	CmdUnknown Command = iota
-	CmdNone
-	CmdUpstream
-	CmdFix
-	CmdDup
-	CmdUnDup
-	CmdTest
-	CmdInvalid
-	CmdUnCC
-
-	cmdTest5
-)
 
 const commandPrefix = "#syz "
 
@@ -103,9 +87,7 @@ func Parse(r io.Reader, ownEmails []string) (*Email, error) {
 		return nil, err
 	}
 	bodyStr := string(body)
-	subject := msg.Header.Get("Subject")
-	cmd := CmdNone
-	patch, cmdStr, cmdArgs := "", "", ""
+	patch, cmd, cmdArgs := "", "", ""
 	if !fromMe {
 		for _, a := range attachments {
 			_, patch, _ = ParsePatch(string(a))
@@ -116,7 +98,7 @@ func Parse(r io.Reader, ownEmails []string) (*Email, error) {
 		if patch == "" {
 			_, patch, _ = ParsePatch(bodyStr)
 		}
-		cmd, cmdStr, cmdArgs = extractCommand(subject + "\n" + bodyStr)
+		cmd, cmdArgs = extractCommand(body)
 	}
 	link := ""
 	if match := groupsLinkRe.FindStringSubmatchIndex(bodyStr); match != nil {
@@ -126,13 +108,12 @@ func Parse(r io.Reader, ownEmails []string) (*Email, error) {
 		BugID:       bugID,
 		MessageID:   msg.Header.Get("Message-ID"),
 		Link:        link,
-		Subject:     subject,
+		Subject:     msg.Header.Get("Subject"),
 		From:        from[0].String(),
 		Cc:          ccList,
-		Body:        bodyStr,
+		Body:        string(body),
 		Patch:       patch,
 		Command:     cmd,
-		CommandStr:  cmdStr,
 		CommandArgs: cmdArgs,
 	}
 	return email, nil
@@ -195,72 +176,49 @@ func CanonicalEmail(email string) string {
 // extractCommand extracts command to syzbot from email body.
 // Commands are of the following form:
 // ^#syz cmd args...
-func extractCommand(body string) (cmd Command, str, args string) {
-	cmdPos := strings.Index("\n"+body, "\n"+commandPrefix)
+func extractCommand(body []byte) (cmd, args string) {
+	cmdPos := bytes.Index(append([]byte{'\n'}, body...), []byte("\n"+commandPrefix))
 	if cmdPos == -1 {
-		cmd = CmdNone
 		return
 	}
 	cmdPos += len(commandPrefix)
 	for cmdPos < len(body) && body[cmdPos] == ' ' {
 		cmdPos++
 	}
-	cmdEnd := strings.IndexByte(body[cmdPos:], '\n')
+	cmdEnd := bytes.IndexByte(body[cmdPos:], '\n')
 	if cmdEnd == -1 {
 		cmdEnd = len(body) - cmdPos
 	}
-	if cmdEnd1 := strings.IndexByte(body[cmdPos:], '\r'); cmdEnd1 != -1 && cmdEnd1 < cmdEnd {
+	if cmdEnd1 := bytes.IndexByte(body[cmdPos:], '\r'); cmdEnd1 != -1 && cmdEnd1 < cmdEnd {
 		cmdEnd = cmdEnd1
 	}
-	if cmdEnd1 := strings.IndexByte(body[cmdPos:], ' '); cmdEnd1 != -1 && cmdEnd1 < cmdEnd {
+	if cmdEnd1 := bytes.IndexByte(body[cmdPos:], ' '); cmdEnd1 != -1 && cmdEnd1 < cmdEnd {
 		cmdEnd = cmdEnd1
 	}
-	str = body[cmdPos : cmdPos+cmdEnd]
-	switch str {
-	default:
-		cmd = CmdUnknown
-	case "":
-		cmd = CmdNone
-	case "upstream":
-		cmd = CmdUpstream
-	case "fix", "fix:":
-		cmd = CmdFix
-	case "dup", "dup:":
-		cmd = CmdDup
-	case "undup":
-		cmd = CmdUnDup
-	case "test", "test:":
-		cmd = CmdTest
-	case "invalid":
-		cmd = CmdInvalid
-	case "uncc", "uncc:":
-		cmd = CmdUnCC
-	case "test_5_arg_cmd":
-		cmd = cmdTest5
-	}
+	cmd = string(body[cmdPos : cmdPos+cmdEnd])
 	// Some email clients split text emails at 80 columns are the transformation is irrevesible.
 	// We try hard to restore what was there before.
 	// For "test:" command we know that there must be 2 tokens without spaces.
 	// For "fix:"/"dup:" we need a whole non-empty line of text.
 	switch cmd {
-	case CmdTest:
+	case "test:":
 		args = extractArgsTokens(body[cmdPos+cmdEnd:], 2)
-	case cmdTest5:
+	case "test_5_arg_cmd":
 		args = extractArgsTokens(body[cmdPos+cmdEnd:], 5)
-	case CmdFix, CmdDup:
+	case "fix:", "dup:":
 		args = extractArgsLine(body[cmdPos+cmdEnd:])
 	}
 	return
 }
 
-func extractArgsTokens(body string, num int) string {
+func extractArgsTokens(body []byte, num int) string {
 	var args []string
 	for pos := 0; len(args) < num && pos < len(body); {
-		lineEnd := strings.IndexByte(body[pos:], '\n')
+		lineEnd := bytes.IndexByte(body[pos:], '\n')
 		if lineEnd == -1 {
 			lineEnd = len(body) - pos
 		}
-		line := strings.TrimSpace(body[pos : pos+lineEnd])
+		line := strings.TrimSpace(string(body[pos : pos+lineEnd]))
 		for {
 			line1 := strings.Replace(line, "  ", " ", -1)
 			if line == line1 {
@@ -276,17 +234,17 @@ func extractArgsTokens(body string, num int) string {
 	return strings.TrimSpace(strings.Join(args, " "))
 }
 
-func extractArgsLine(body string) string {
+func extractArgsLine(body []byte) string {
 	pos := 0
 	for pos < len(body) && (body[pos] == ' ' || body[pos] == '\t' ||
 		body[pos] == '\n' || body[pos] == '\r') {
 		pos++
 	}
-	lineEnd := strings.IndexByte(body[pos:], '\n')
+	lineEnd := bytes.IndexByte(body[pos:], '\n')
 	if lineEnd == -1 {
 		lineEnd = len(body) - pos
 	}
-	return strings.TrimSpace(body[pos : pos+lineEnd])
+	return strings.TrimSpace(string(body[pos : pos+lineEnd]))
 }
 
 func parseBody(r io.Reader, headers mail.Header) ([]byte, [][]byte, error) {
@@ -369,17 +327,6 @@ func MergeEmailLists(lists ...[]string) []string {
 	sort.Strings(result)
 	if len(result) > maxEmails {
 		result = result[:maxEmails]
-	}
-	return result
-}
-
-func RemoveFromEmailList(list []string, toRemove string) []string {
-	var result []string
-	toRemove = CanonicalEmail(toRemove)
-	for _, email := range list {
-		if CanonicalEmail(email) != toRemove {
-			result = append(result, email)
-		}
 	}
 	return result
 }

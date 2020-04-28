@@ -29,12 +29,11 @@ type ConnectArgs struct {
 }
 
 type ConnectRes struct {
-	EnabledCalls     []int
-	GitRevision      string
-	TargetRevision   string
-	AllSandboxes     bool
-	CheckResult      *CheckArgs
-	MemoryLeakFrames []string
+	EnabledCalls   []int
+	GitRevision    string
+	TargetRevision string
+	AllSandboxes   bool
+	CheckResult    *CheckArgs
 }
 
 type CheckArgs struct {
@@ -124,6 +123,6 @@ type RunTestDoneArgs struct {
 	Name   string
 	ID     int
 	Output []byte
-	Info   []*ipc.ProgInfo
+	Info   [][]ipc.CallInfo
 	Error  string
 }

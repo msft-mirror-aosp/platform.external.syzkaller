@@ -424,22 +424,18 @@ func (p *parser) parseType() *Type {
 		p.expect(tokInt, tokIdent, tokString)
 	}
 	p.next()
-	if allowColon {
-		for p.tryConsume(tokColon) {
-			col := &Type{
-				Pos: p.pos,
-			}
-			switch p.tok {
-			case tokInt:
-				col.Value, col.ValueFmt = p.parseIntValue()
-			case tokIdent:
-				col.Ident = p.lit
-			default:
-				p.expect(tokInt, tokIdent)
-			}
-			arg.Colon = append(arg.Colon, col)
-			p.next()
+	if allowColon && p.tryConsume(tokColon) {
+		arg.HasColon = true
+		arg.Pos2 = p.pos
+		switch p.tok {
+		case tokInt:
+			arg.Value2, arg.Value2Fmt = p.parseIntValue()
+		case tokIdent:
+			arg.Ident2 = p.lit
+		default:
+			p.expect(tokInt, tokIdent)
 		}
+		p.next()
 	}
 	arg.Args = p.parseTypeList()
 	return arg

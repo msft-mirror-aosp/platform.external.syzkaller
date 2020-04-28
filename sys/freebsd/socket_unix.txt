@@ -38,14 +38,12 @@ sockaddr_un [
 ] [varlen]
 
 sockaddr_un_file {
-	len	len[parent, int8]
-	family	flags[unix_socket_family, int8]
+	family	flags[unix_socket_family, int16]
 	path	filename
 } [packed]
 
 sockaddr_un_abstract {
-	len	len[parent, int8]
-	family	flags[unix_socket_family, int8]
+	family	flags[unix_socket_family, int16]
 	ind	const[0, int8]
 	id	proc[20000, 4, int32]
 }

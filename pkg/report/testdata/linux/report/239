@@ -1,5 +1,4 @@
-TITLE: WARNING in corrupted
-CORRUPTED: Y
+TITLE: WARNING in finish_task_switch
 
 syzkaller login: ------------[ cut here ]------------
 WARNING: CPU: 5 PID: -534549613 at kernel/sched/core.c:2681 finish_task_switch+0x230/0x23c

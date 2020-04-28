@@ -1,5 +1,4 @@
 TITLE: INFO: rcu detected stall in corrupted
-TYPE: HANG
 CORRUPTED: Y
 
 INFO: rcu_sched detected stalls on CPUs/tasks:

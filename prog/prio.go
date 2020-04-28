@@ -175,9 +175,6 @@ func normalizePrio(prios [][]float32) {
 		if nzero != 0 {
 			min /= 2 * float32(nzero)
 		}
-		if min == max {
-			max = 0
-		}
 		for i, p := range prio {
 			if max == 0 {
 				prio[i] = 1
@@ -214,9 +211,6 @@ func (target *Target) BuildChoiceTable(prios [][]float32, enabled map[*Syscall]b
 	var enabledCalls []*Syscall
 	for c := range enabled {
 		enabledCalls = append(enabledCalls, c)
-	}
-	if len(enabledCalls) == 0 {
-		panic(fmt.Sprintf("empty enabledCalls, len(target.Syscalls)=%v", len(target.Syscalls)))
 	}
 	run := make([][]int, len(target.Syscalls))
 	for i := range run {

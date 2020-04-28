@@ -16,8 +16,6 @@ include <termios.h>
 resource fd[int32]: 0xffffffffffffffff, AT_FDCWD
 resource pid[int32]: 0, 0xffffffffffffffff
 
-syz_execute_func(text ptr[in, text[target]])
-
 openat(fromfd fd[opt], path ptr[in, filename], path_l len[path], oflag flags[open_flags], mode flags[open_mode]) fd
 read(fd fd, buf buffer[out], count len[buf])
 write(fd fd, buf buffer[in], count len[buf])
@@ -83,7 +81,7 @@ self_notify(vcoreid int32, ev_type flags[event_type], u_msg ptr[in, event_msg], 
 halt_core(usec intptr)
 change_to_m()
 poke_ksched(target_pid pid[opt], res_type const[0])
-abort_sysc(sysc intptr)
+abort_sysc(syscall intptr)
 populate_va(va vma, nr_pgs intptr)
 vmm_add_gpcs(nr_more_gpcs intptr, gpcis ptr[in, vmm_gpcore_init])
 vc_entry()

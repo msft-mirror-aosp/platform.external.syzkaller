@@ -13,7 +13,6 @@ import (
 	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
-	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/pkg/vcs"
 )
 
@@ -53,7 +52,6 @@ type ReproConfig struct {
 type env struct {
 	cfg       *Config
 	repo      vcs.Repo
-	bisecter  vcs.Bisecter
 	head      *vcs.Commit
 	inst      *instance.Env
 	numTests  int
@@ -61,115 +59,82 @@ type env struct {
 	testTime  time.Duration
 }
 
-const NumTests = 10 // number of tests we do per commit
+type buildEnv struct {
+	compiler string
+}
 
-// Run does the bisection and returns:
-//  - if bisection is conclusive, the single cause/fix commit
-//    - for cause bisection report is the crash on the cause commit
-//    - for fix bisection report is nil
-//  - if bisection is inconclusive, range of potential cause/fix commits
-//    - report is nil in such case
-//  - if the crash still happens on the oldest release/HEAD (for cause/fix bisection correspondingly),
-//    no commits and the crash report on the oldest release/HEAD
-//  - if the crash is not reproduced on the start commit, an error
-func Run(cfg *Config) ([]*vcs.Commit, *report.Report, error) {
-	if err := checkConfig(cfg); err != nil {
-		return nil, nil, err
-	}
-	cfg.Manager.Cover = false // it's not supported somewhere back in time
+func Run(cfg *Config) (*vcs.Commit, error) {
 	repo, err := vcs.NewRepo(cfg.Manager.TargetOS, cfg.Manager.Type, cfg.Manager.KernelSrc)
 	if err != nil {
-		return nil, nil, err
-	}
-	bisecter, ok := repo.(vcs.Bisecter)
-	if !ok {
-		return nil, nil, fmt.Errorf("bisection is not implemented for %v", cfg.Manager.TargetOS)
+		return nil, err
 	}
 	env := &env{
-		cfg:      cfg,
-		repo:     repo,
-		bisecter: bisecter,
+		cfg:  cfg,
+		repo: repo,
 	}
 	if cfg.Fix {
-		env.log("bisecting fixing commit since %v", cfg.Kernel.Commit)
+		env.log("searching for fixing commit since %v", cfg.Kernel.Commit)
 	} else {
-		env.log("bisecting cause commit starting from %v", cfg.Kernel.Commit)
+		env.log("searching for guilty commit starting from %v", cfg.Kernel.Commit)
 	}
 	start := time.Now()
-	commits, rep, err := env.bisect()
+	res, err := env.bisect()
 	env.log("revisions tested: %v, total time: %v (build: %v, test: %v)",
 		env.numTests, time.Since(start), env.buildTime, env.testTime)
 	if err != nil {
 		env.log("error: %v", err)
-		return nil, nil, err
+		return nil, err
 	}
-	if len(commits) == 0 {
-		if cfg.Fix {
-			env.log("the crash still happens on HEAD")
-		} else {
-			env.log("the crash already happened on the oldest tested release")
-		}
-		env.log("crash: %v\n%s", rep.Title, rep.Report)
-		return nil, rep, nil
+	if res == nil {
+		env.log("the crash is still unfixed")
+		return nil, nil
 	}
 	what := "bad"
 	if cfg.Fix {
 		what = "good"
 	}
-	if len(commits) > 1 {
-		env.log("bisection is inconclusive, the first %v commit could be any of:", what)
-		for _, com := range commits {
-			env.log("%v", com.Hash)
-		}
-		return commits, nil, nil
-	}
-	com := commits[0]
-	env.log("first %v commit: %v %v", what, com.Hash, com.Title)
-	env.log("cc: %q", com.CC)
-	if rep != nil {
-		env.log("crash: %v\n%s", rep.Title, rep.Report)
-	}
-	return commits, rep, nil
+	env.log("first %v commit: %v %v", what, res.Hash, res.Title)
+	env.log("cc: %q", res.CC)
+	return res, nil
 }
 
-func (env *env) bisect() ([]*vcs.Commit, *report.Report, error) {
+func (env *env) bisect() (*vcs.Commit, error) {
 	cfg := env.cfg
 	var err error
 	if env.inst, err = instance.NewEnv(&cfg.Manager); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if env.head, err = env.repo.CheckoutBranch(cfg.Kernel.Repo, cfg.Kernel.Branch); err != nil {
-		return nil, nil, err
+	if env.head, err = env.repo.Poll(cfg.Kernel.Repo, cfg.Kernel.Branch); err != nil {
+		return nil, err
 	}
 	if err := build.Clean(cfg.Manager.TargetOS, cfg.Manager.TargetVMArch,
 		cfg.Manager.Type, cfg.Manager.KernelSrc); err != nil {
-		return nil, nil, fmt.Errorf("kernel clean failed: %v", err)
+		return nil, fmt.Errorf("kernel clean failed: %v", err)
 	}
 	env.log("building syzkaller on %v", cfg.Syzkaller.Commit)
 	if err := env.inst.BuildSyzkaller(cfg.Syzkaller.Repo, cfg.Syzkaller.Commit); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if _, err := env.repo.CheckoutCommit(cfg.Kernel.Repo, cfg.Kernel.Commit); err != nil {
-		return nil, nil, err
+	if _, err := env.repo.SwitchCommit(cfg.Kernel.Commit); err != nil {
+		return nil, err
 	}
-	res, _, rep0, err := env.test()
-	if err != nil {
-		return nil, nil, err
+	if res, err := env.test(); err != nil {
+		return nil, err
 	} else if res != vcs.BisectBad {
-		return nil, nil, fmt.Errorf("the crash wasn't reproduced on the original commit")
+		return nil, fmt.Errorf("the crash wasn't reproduced on the original commit")
 	}
-	bad, good, rep1, err := env.commitRange()
+	res, bad, good, err := env.commitRange()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	if res != nil {
+		return res, nil // happens on the oldest release
 	}
 	if good == "" {
-		return nil, rep1, nil // still not fixed/happens on the oldest release
+		return nil, nil // still not fixed
 	}
-	reports := make(map[string]*report.Report)
-	reports[cfg.Kernel.Commit] = rep0
-	commits, err := env.bisecter.Bisect(bad, good, cfg.Trace, func() (vcs.BisectResult, error) {
-		res, com, rep, err := env.test()
-		reports[com.Hash] = rep
+	return env.repo.Bisect(bad, good, cfg.Trace, func() (vcs.BisectResult, error) {
+		res, err := env.test()
 		if cfg.Fix {
 			if res == vcs.BisectBad {
 				res = vcs.BisectGood
@@ -179,125 +144,123 @@ func (env *env) bisect() ([]*vcs.Commit, *report.Report, error) {
 		}
 		return res, err
 	})
-	var rep *report.Report
-	if len(commits) == 1 {
-		rep = reports[commits[0].Hash]
-	}
-	return commits, rep, err
 }
 
-func (env *env) commitRange() (string, string, *report.Report, error) {
+func (env *env) commitRange() (*vcs.Commit, string, string, error) {
 	if env.cfg.Fix {
 		return env.commitRangeForFix()
 	}
 	return env.commitRangeForBug()
 }
 
-func (env *env) commitRangeForFix() (string, string, *report.Report, error) {
+func (env *env) commitRangeForFix() (*vcs.Commit, string, string, error) {
 	env.log("testing current HEAD %v", env.head.Hash)
 	if _, err := env.repo.SwitchCommit(env.head.Hash); err != nil {
-		return "", "", nil, err
+		return nil, "", "", err
 	}
-	res, _, rep, err := env.test()
+	res, err := env.test()
 	if err != nil {
-		return "", "", nil, err
+		return nil, "", "", err
 	}
 	if res != vcs.BisectGood {
-		return "", "", rep, nil
+		return nil, "", "", nil
 	}
-	return env.head.Hash, env.cfg.Kernel.Commit, nil, nil
+	return nil, env.head.Hash, env.cfg.Kernel.Commit, nil
 }
 
-func (env *env) commitRangeForBug() (string, string, *report.Report, error) {
+func (env *env) commitRangeForBug() (*vcs.Commit, string, string, error) {
 	cfg := env.cfg
-	tags, err := env.bisecter.PreviousReleaseTags(cfg.Kernel.Commit)
+	tags, err := env.repo.PreviousReleaseTags(cfg.Kernel.Commit)
 	if err != nil {
-		return "", "", nil, err
+		return nil, "", "", err
+	}
+	for i, tag := range tags {
+		if tag == "v3.8" {
+			// v3.8 does not work with modern perl, and as we go further in history
+			// make stops to work, then binutils, glibc, etc. So we stop at v3.8.
+			// Up to that point we only need an ancient gcc.
+			tags = tags[:i]
+			break
+		}
 	}
 	if len(tags) == 0 {
-		return "", "", nil, fmt.Errorf("no release tags before this commit")
+		return nil, "", "", fmt.Errorf("no release tags before this commit")
 	}
 	lastBad := cfg.Kernel.Commit
-	var lastRep *report.Report
-	for _, tag := range tags {
+	for i, tag := range tags {
 		env.log("testing release %v", tag)
-		if _, err := env.repo.SwitchCommit(tag); err != nil {
-			return "", "", nil, err
-		}
-		res, _, rep, err := env.test()
+		commit, err := env.repo.SwitchCommit(tag)
 		if err != nil {
-			return "", "", nil, err
+			return nil, "", "", err
+		}
+		res, err := env.test()
+		if err != nil {
+			return nil, "", "", err
 		}
 		if res == vcs.BisectGood {
-			return lastBad, tag, nil, nil
+			return nil, lastBad, tag, nil
 		}
 		if res == vcs.BisectBad {
 			lastBad = tag
-			lastRep = rep
+		}
+		if i == len(tags)-1 {
+			return commit, "", "", nil
 		}
 	}
-	return "", "", lastRep, nil
+	panic("unreachable")
 }
 
-func (env *env) test() (vcs.BisectResult, *vcs.Commit, *report.Report, error) {
+func (env *env) test() (vcs.BisectResult, error) {
 	cfg := env.cfg
 	env.numTests++
 	current, err := env.repo.HeadCommit()
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, err
 	}
-	bisectEnv, err := env.bisecter.EnvForCommit(current.Hash, cfg.Kernel.Config)
+	be, err := env.buildEnvForCommit(current.Hash)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, err
 	}
-	compiler := filepath.Join(cfg.BinDir, bisectEnv.Compiler, "bin", "gcc")
-	compilerID, err := build.CompilerIdentity(compiler)
+	compilerID, err := build.CompilerIdentity(be.compiler)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, err
 	}
 	env.log("testing commit %v with %v", current.Hash, compilerID)
 	buildStart := time.Now()
 	if err := build.Clean(cfg.Manager.TargetOS, cfg.Manager.TargetVMArch,
 		cfg.Manager.Type, cfg.Manager.KernelSrc); err != nil {
-		return 0, nil, nil, fmt.Errorf("kernel clean failed: %v", err)
+		return 0, fmt.Errorf("kernel clean failed: %v", err)
 	}
-	_, err = env.inst.BuildKernel(compiler, cfg.Kernel.Userspace,
-		cfg.Kernel.Cmdline, cfg.Kernel.Sysctl, bisectEnv.KernelConfig)
+	err = env.inst.BuildKernel(be.compiler, cfg.Kernel.Userspace,
+		cfg.Kernel.Cmdline, cfg.Kernel.Sysctl, cfg.Kernel.Config)
 	env.buildTime += time.Since(buildStart)
 	if err != nil {
 		if verr, ok := err.(*osutil.VerboseError); ok {
 			env.log("%v", verr.Title)
 			env.saveDebugFile(current.Hash, 0, verr.Output)
-		} else if verr, ok := err.(build.KernelBuildError); ok {
-			env.log("%v", verr.Title)
-			env.saveDebugFile(current.Hash, 0, verr.Output)
 		} else {
 			env.log("%v", err)
 		}
-		return vcs.BisectSkip, current, nil, nil
+		return vcs.BisectSkip, nil
 	}
 	testStart := time.Now()
-	results, err := env.inst.Test(NumTests, cfg.Repro.Syz, cfg.Repro.Opts, cfg.Repro.C)
+	results, err := env.inst.Test(8, cfg.Repro.Syz, cfg.Repro.Opts, cfg.Repro.C)
 	env.testTime += time.Since(testStart)
 	if err != nil {
 		env.log("failed: %v", err)
-		return vcs.BisectSkip, current, nil, nil
+		return vcs.BisectSkip, nil
 	}
-	bad, good, rep := env.processResults(current, results)
+	bad, good := env.processResults(current, results)
 	res := vcs.BisectSkip
 	if bad != 0 {
 		res = vcs.BisectBad
-	} else if NumTests-good-bad > NumTests/3*2 {
-		// More than 2/3 of instances failed with infrastructure error,
-		// can't reliably tell that the commit is good.
-		res = vcs.BisectSkip
 	} else if good != 0 {
 		res = vcs.BisectGood
 	}
-	return res, current, rep, nil
+	return res, nil
 }
 
-func (env *env) processResults(current *vcs.Commit, results []error) (bad, good int, rep *report.Report) {
+func (env *env) processResults(current *vcs.Commit, results []error) (bad, good int) {
 	var verdicts []string
 	for i, res := range results {
 		if res == nil {
@@ -319,7 +282,6 @@ func (env *env) processResults(current *vcs.Commit, results []error) (bad, good 
 			env.saveDebugFile(current.Hash, i, output)
 		case *instance.CrashError:
 			bad++
-			rep = err.Report
 			verdicts = append(verdicts, fmt.Sprintf("crashed: %v", err))
 			output := err.Report.Report
 			if len(output) == 0 {
@@ -344,28 +306,38 @@ func (env *env) processResults(current *vcs.Commit, results []error) (bad, good 
 	return
 }
 
+// Note: linux-specific.
+func (env *env) buildEnvForCommit(commit string) (*buildEnv, error) {
+	cfg := env.cfg
+	tags, err := env.repo.PreviousReleaseTags(commit)
+	if err != nil {
+		return nil, err
+	}
+	be := &buildEnv{
+		compiler: filepath.Join(cfg.BinDir, "gcc-"+linuxCompilerVersion(tags), "bin", "gcc"),
+	}
+	return be, nil
+}
+
+func linuxCompilerVersion(tags []string) string {
+	for _, tag := range tags {
+		switch tag {
+		case "v4.12":
+			return "8.1.0"
+		case "v4.11":
+			return "7.3.0"
+		case "v3.19":
+			return "5.5.0"
+		}
+	}
+	return "4.9.4"
+}
+
 func (env *env) saveDebugFile(hash string, idx int, data []byte) {
 	if env.cfg.DebugDir == "" || len(data) == 0 {
 		return
 	}
-	osutil.MkdirAll(env.cfg.DebugDir)
 	osutil.WriteFile(filepath.Join(env.cfg.DebugDir, fmt.Sprintf("%v.%v", hash, idx)), data)
-}
-
-func checkConfig(cfg *Config) error {
-	if !osutil.IsExist(cfg.BinDir) {
-		return fmt.Errorf("bin dir %v does not exist", cfg.BinDir)
-	}
-	if cfg.Kernel.Userspace != "" && !osutil.IsExist(cfg.Kernel.Userspace) {
-		return fmt.Errorf("userspace dir %v does not exist", cfg.Kernel.Userspace)
-	}
-	if cfg.Kernel.Sysctl != "" && !osutil.IsExist(cfg.Kernel.Sysctl) {
-		return fmt.Errorf("sysctl file %v does not exist", cfg.Kernel.Sysctl)
-	}
-	if cfg.Kernel.Cmdline != "" && !osutil.IsExist(cfg.Kernel.Cmdline) {
-		return fmt.Errorf("cmdline file %v does not exist", cfg.Kernel.Cmdline)
-	}
-	return nil
 }
 
 func (env *env) log(msg string, args ...interface{}) {

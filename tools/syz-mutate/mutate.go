@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/syzkaller/pkg/db"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/prog"
 	_ "github.com/google/syzkaller/sys"
@@ -26,7 +25,6 @@ var (
 	flagSeed   = flag.Int("seed", -1, "prng seed")
 	flagLen    = flag.Int("len", 30, "number of calls in programs")
 	flagEnable = flag.String("enable", "", "comma-separated list of enabled syscalls")
-	flagCorpus = flag.String("corpus", "", "name of the corpus file")
 )
 
 func main() {
@@ -38,14 +36,13 @@ func main() {
 	}
 	var syscalls map[*prog.Syscall]bool
 	if *flagEnable != "" {
-		enabled := strings.Split(*flagEnable, ",")
-		syscallsIDs, err := mgrconfig.ParseEnabledSyscalls(target, enabled, nil)
+		syscallsIDs, err := mgrconfig.ParseEnabledSyscalls(target, strings.Split(*flagEnable, ","), nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to parse enabled syscalls: %v", err)
 			os.Exit(1)
 		}
 		syscalls = make(map[*prog.Syscall]bool)
-		for _, id := range syscallsIDs {
+		for id := range syscallsIDs {
 			syscalls[target.Syscalls[id]] = true
 		}
 		var disabled map[*prog.Syscall]string
@@ -58,12 +55,8 @@ func main() {
 	if *flagSeed != -1 {
 		seed = int64(*flagSeed)
 	}
-	var corpus []*prog.Prog
-	if *flagCorpus != "" {
-		corpus = readCorpus(*flagCorpus, target)
-	}
 	rs := rand.NewSource(seed)
-	prios := target.CalculatePriorities(corpus)
+	prios := target.CalculatePriorities(nil)
 	ct := target.BuildChoiceTable(prios, syscalls)
 	var p *prog.Prog
 	if flag.NArg() == 0 {
@@ -74,29 +67,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "failed to read prog file: %v\n", err)
 			os.Exit(1)
 		}
-		p, err = target.Deserialize(data, prog.NonStrict)
+		p, err = target.Deserialize(data)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to deserialize the program: %v\n", err)
 			os.Exit(1)
 		}
-		p.Mutate(rs, *flagLen, ct, corpus)
+		p.Mutate(rs, *flagLen, ct, nil)
 	}
 	fmt.Printf("%s\n", p.Serialize())
-}
-
-func readCorpus(filename string, target *prog.Target) (corpus []*prog.Prog) {
-	dbObj, err := db.Open(filename)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open the corpus file: %v\n", err)
-		os.Exit(1)
-	}
-	for _, v := range dbObj.Records {
-		p, err := target.Deserialize(v.Val, prog.NonStrict)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to deserialize the program: %v\n", err)
-			os.Exit(1)
-		}
-		corpus = append(corpus, p)
-	}
-	return corpus
 }

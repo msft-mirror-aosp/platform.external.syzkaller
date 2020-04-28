@@ -85,8 +85,8 @@ func (a *ConstArg) serialize(ctx *serializer) {
 }
 
 func (a *PointerArg) serialize(ctx *serializer) {
-	if a.IsSpecial() {
-		ctx.printf("0x%x", a.Address)
+	if a.IsNull() {
+		ctx.printf("0x0")
 		return
 	}
 	target := ctx.target
@@ -102,26 +102,19 @@ func (a *PointerArg) serialize(ctx *serializer) {
 }
 
 func (a *DataArg) serialize(ctx *serializer) {
-	typ := a.Type().(*BufferType)
-	if typ.Dir() == DirOut {
+	if a.Type().Dir() == DirOut {
 		ctx.printf("\"\"/%v", a.Size())
 		return
 	}
 	data := a.Data()
-	// Statically typed data will be padded with 0s during deserialization,
-	// so we can strip them here for readability always. For variable-size
-	// data we strip trailing 0s only if we strip enough of them.
-	sz := len(data)
-	for len(data) >= 2 && data[len(data)-1] == 0 && data[len(data)-2] == 0 {
-		data = data[:len(data)-1]
+	if !a.Type().Varlen() {
+		// Statically typed data will be padded with 0s during
+		// deserialization, so we can strip them here for readability.
+		for len(data) >= 2 && data[len(data)-1] == 0 && data[len(data)-2] == 0 {
+			data = data[:len(data)-1]
+		}
 	}
-	if typ.Varlen() && len(data)+8 >= sz {
-		data = data[:sz]
-	}
-	serializeData(ctx.buf, data, isReadableDataType(typ))
-	if typ.Varlen() && sz != len(data) {
-		ctx.printf("/%v", sz)
-	}
+	serializeData(ctx.buf, data)
 }
 
 func (a *GroupArg) serialize(ctx *serializer) {
@@ -186,54 +179,26 @@ func (a *ResultArg) serialize(ctx *serializer) {
 	}
 }
 
-type DeserializeMode int
-
-const (
-	Strict    DeserializeMode = iota
-	NonStrict DeserializeMode = iota
-)
-
-func (target *Target) Deserialize(data []byte, mode DeserializeMode) (*Prog, error) {
-	p := newParser(target, data, mode == Strict)
-	prog, err := p.parseProg()
-	if err := p.Err(); err != nil {
-		return nil, err
+func (target *Target) Deserialize(data []byte) (prog *Prog, err error) {
+	prog = &Prog{
+		Target: target,
 	}
-	if err != nil {
-		return nil, err
-	}
-	// This validation is done even in non-debug mode because deserialization
-	// procedure does not catch all bugs (e.g. mismatched types).
-	// And we can receive bad programs from corpus and hub.
-	if err := prog.validate(); err != nil {
-		return nil, err
-	}
-	if p.autos != nil {
-		p.fixupAutos(prog)
-	}
-	for _, c := range prog.Calls {
-		target.SanitizeCall(c)
-	}
-	return prog, nil
-}
-
-func (p *parser) parseProg() (*Prog, error) {
-	prog := &Prog{
-		Target: p.target,
-	}
+	p := newParser(data)
+	vars := make(map[string]*ResultArg)
+	comment := ""
 	for p.Scan() {
 		if p.EOF() {
-			if p.comment != "" {
-				prog.Comments = append(prog.Comments, p.comment)
-				p.comment = ""
+			if comment != "" {
+				prog.Comments = append(prog.Comments, comment)
+				comment = ""
 			}
 			continue
 		}
 		if p.Char() == '#' {
-			if p.comment != "" {
-				prog.Comments = append(prog.Comments, p.comment)
+			if comment != "" {
+				prog.Comments = append(prog.Comments, comment)
 			}
-			p.comment = strings.TrimSpace(p.s[p.i+1:])
+			comment = strings.TrimSpace(p.s[p.i+1:])
 			continue
 		}
 		name := p.Ident()
@@ -244,27 +209,27 @@ func (p *parser) parseProg() (*Prog, error) {
 			name = p.Ident()
 
 		}
-		meta := p.target.SyscallMap[name]
+		meta := target.SyscallMap[name]
 		if meta == nil {
 			return nil, fmt.Errorf("unknown syscall %v", name)
 		}
 		c := &Call{
 			Meta:    meta,
 			Ret:     MakeReturnArg(meta.Ret),
-			Comment: p.comment,
+			Comment: comment,
 		}
 		prog.Calls = append(prog.Calls, c)
 		p.Parse('(')
 		for i := 0; p.Char() != ')'; i++ {
 			if i >= len(meta.Args) {
-				p.eatExcessive(false, "excessive syscall arguments")
+				eatExcessive(p, false)
 				break
 			}
 			typ := meta.Args[i]
 			if IsPad(typ) {
 				return nil, fmt.Errorf("padding in syscall %v arguments", name)
 			}
-			arg, err := p.parseArg(typ)
+			arg, err := target.parseArg(typ, p, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -285,24 +250,35 @@ func (p *parser) parseProg() (*Prog, error) {
 			c.Comment = strings.TrimSpace(p.s[p.i+1:])
 		}
 		for i := len(c.Args); i < len(meta.Args); i++ {
-			p.strictFailf("missing syscall args")
-			c.Args = append(c.Args, meta.Args[i].DefaultArg())
+			c.Args = append(c.Args, meta.Args[i].makeDefaultArg())
 		}
 		if len(c.Args) != len(meta.Args) {
 			return nil, fmt.Errorf("wrong call arg count: %v, want %v", len(c.Args), len(meta.Args))
 		}
 		if r != "" && c.Ret != nil {
-			p.vars[r] = c.Ret
+			vars[r] = c.Ret
 		}
-		p.comment = ""
+		comment = ""
 	}
-	if p.comment != "" {
-		prog.Comments = append(prog.Comments, p.comment)
+	if comment != "" {
+		prog.Comments = append(prog.Comments, comment)
 	}
-	return prog, nil
+	if err := p.Err(); err != nil {
+		return nil, err
+	}
+	// This validation is done even in non-debug mode because deserialization
+	// procedure does not catch all bugs (e.g. mismatched types).
+	// And we can receive bad programs from corpus and hub.
+	if err := prog.validate(); err != nil {
+		return nil, err
+	}
+	for _, c := range prog.Calls {
+		target.SanitizeCall(c)
+	}
+	return
 }
 
-func (p *parser) parseArg(typ Type) (Arg, error) {
+func (target *Target) parseArg(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	r := ""
 	if p.Char() == '<' {
 		p.Parse('<')
@@ -310,62 +286,54 @@ func (p *parser) parseArg(typ Type) (Arg, error) {
 		p.Parse('=')
 		p.Parse('>')
 	}
-	arg, err := p.parseArgImpl(typ)
+	arg, err := target.parseArgImpl(typ, p, vars)
 	if err != nil {
 		return nil, err
 	}
 	if arg == nil {
 		if typ != nil {
-			arg = typ.DefaultArg()
+			arg = typ.makeDefaultArg()
 		} else if r != "" {
 			return nil, fmt.Errorf("named nil argument")
 		}
 	}
 	if r != "" {
 		if res, ok := arg.(*ResultArg); ok {
-			p.vars[r] = res
+			vars[r] = res
 		}
 	}
 	return arg, nil
 }
 
-func (p *parser) parseArgImpl(typ Type) (Arg, error) {
-	if typ == nil && p.Char() != 'n' {
-		return nil, fmt.Errorf("non-nil argument for nil type")
-	}
+func (target *Target) parseArgImpl(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	switch p.Char() {
 	case '0':
-		return p.parseArgInt(typ)
+		return target.parseArgInt(typ, p)
 	case 'r':
-		return p.parseArgRes(typ)
+		return target.parseArgRes(typ, p, vars)
 	case '&':
-		return p.parseArgAddr(typ)
+		return target.parseArgAddr(typ, p, vars)
 	case '"', '\'':
-		return p.parseArgString(typ)
+		return target.parseArgString(typ, p)
 	case '{':
-		return p.parseArgStruct(typ)
+		return target.parseArgStruct(typ, p, vars)
 	case '[':
-		return p.parseArgArray(typ)
+		return target.parseArgArray(typ, p, vars)
 	case '@':
-		return p.parseArgUnion(typ)
+		return target.parseArgUnion(typ, p, vars)
 	case 'n':
 		p.Parse('n')
 		p.Parse('i')
 		p.Parse('l')
 		return nil, nil
-	case 'A':
-		p.Parse('A')
-		p.Parse('U')
-		p.Parse('T')
-		p.Parse('O')
-		return p.parseAuto(typ)
+
 	default:
-		return nil, fmt.Errorf("failed to parse argument at '%c' (line #%v/%v: %v)",
-			p.Char(), p.l, p.i, p.s)
+		return nil, fmt.Errorf("failed to parse argument at %v (line #%v/%v: %v)",
+			int(p.Char()), p.l, p.i, p.s)
 	}
 }
 
-func (p *parser) parseArgInt(typ Type) (Arg, error) {
+func (target *Target) parseArgInt(typ Type, p *parser) (Arg, error) {
 	val := p.Ident()
 	v, err := strconv.ParseUint(val, 0, 64)
 	if err != nil {
@@ -377,24 +345,17 @@ func (p *parser) parseArgInt(typ Type) (Arg, error) {
 	case *ResourceType:
 		return MakeResultArg(typ, nil, v), nil
 	case *PtrType, *VmaType:
-		index := -v % uint64(len(p.target.SpecialPointers))
-		return MakeSpecialPointerArg(typ, index), nil
+		if typ.Optional() {
+			return MakeNullPointerArg(typ), nil
+		}
+		return typ.makeDefaultArg(), nil
 	default:
-		p.eatExcessive(true, "wrong int arg")
-		return typ.DefaultArg(), nil
+		eatExcessive(p, true)
+		return typ.makeDefaultArg(), nil
 	}
 }
 
-func (p *parser) parseAuto(typ Type) (Arg, error) {
-	switch typ.(type) {
-	case *ConstType, *LenType, *CsumType:
-		return p.auto(MakeConstArg(typ, 0)), nil
-	default:
-		return nil, fmt.Errorf("wrong type %T for AUTO", typ)
-	}
-}
-
-func (p *parser) parseArgRes(typ Type) (Arg, error) {
+func (target *Target) parseArgRes(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	id := p.Ident()
 	var div, add uint64
 	if p.Char() == '/' {
@@ -415,10 +376,9 @@ func (p *parser) parseArgRes(typ Type) (Arg, error) {
 		}
 		add = v
 	}
-	v := p.vars[id]
+	v := vars[id]
 	if v == nil {
-		p.strictFailf("undeclared variable %v", id)
-		return typ.DefaultArg(), nil
+		return typ.makeDefaultArg(), nil
 	}
 	arg := MakeResultArg(typ, v, 0)
 	arg.OpDiv = div
@@ -426,34 +386,20 @@ func (p *parser) parseArgRes(typ Type) (Arg, error) {
 	return arg, nil
 }
 
-func (p *parser) parseArgAddr(typ Type) (Arg, error) {
+func (target *Target) parseArgAddr(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	var typ1 Type
 	switch t1 := typ.(type) {
 	case *PtrType:
 		typ1 = t1.Type
 	case *VmaType:
 	default:
-		p.eatExcessive(true, "wrong addr arg")
-		return typ.DefaultArg(), nil
+		eatExcessive(p, true)
+		return typ.makeDefaultArg(), nil
 	}
 	p.Parse('&')
-	auto := false
-	var addr, vmaSize uint64
-	if p.Char() == 'A' {
-		p.Parse('A')
-		p.Parse('U')
-		p.Parse('T')
-		p.Parse('O')
-		if typ1 == nil {
-			return nil, fmt.Errorf("vma type can't be AUTO")
-		}
-		auto = true
-	} else {
-		var err error
-		addr, vmaSize, err = p.parseAddr()
-		if err != nil {
-			return nil, err
-		}
+	addr, vmaSize, err := target.parseAddr(p)
+	if err != nil {
+		return nil, err
 	}
 	var inner Arg
 	if p.Char() == '=' {
@@ -463,38 +409,29 @@ func (p *parser) parseArgAddr(typ Type) (Arg, error) {
 			p.Parse('N')
 			p.Parse('Y')
 			p.Parse('=')
-			typ = p.target.makeAnyPtrType(typ.Size(), typ.FieldName())
-			typ1 = p.target.any.array
+			typ = target.makeAnyPtrType(typ.Size(), typ.FieldName())
+			typ1 = target.any.array
 		}
-		var err error
-		inner, err = p.parseArg(typ1)
+		inner, err = target.parseArg(typ1, p, vars)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if typ1 == nil {
-		if addr%p.target.PageSize != 0 {
-			p.strictFailf("unaligned vma address 0x%x", addr)
-			addr &= ^(p.target.PageSize - 1)
-		}
 		return MakeVmaPointerArg(typ, addr, vmaSize), nil
 	}
 	if inner == nil {
-		inner = typ1.DefaultArg()
+		inner = typ1.makeDefaultArg()
 	}
-	arg := MakePointerArg(typ, addr, inner)
-	if auto {
-		p.auto(arg)
-	}
-	return arg, nil
+	return MakePointerArg(typ, addr, inner), nil
 }
 
-func (p *parser) parseArgString(typ Type) (Arg, error) {
+func (target *Target) parseArgString(typ Type, p *parser) (Arg, error) {
 	if _, ok := typ.(*BufferType); !ok {
-		p.eatExcessive(true, "wrong string arg")
-		return typ.DefaultArg(), nil
+		eatExcessive(p, true)
+		return typ.makeDefaultArg(), nil
 	}
-	data, err := p.deserializeData()
+	data, err := deserializeData(p)
 	if err != nil {
 		return nil, err
 	}
@@ -505,11 +442,6 @@ func (p *parser) parseArgString(typ Type) (Arg, error) {
 		size, err = strconv.ParseUint(sizeStr, 0, 64)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse buffer size: %q", sizeStr)
-		}
-		maxMem := p.target.NumPages * p.target.PageSize
-		if size > maxMem {
-			p.strictFailf("too large string argument %v", size)
-			size = maxMem
 		}
 	}
 	if !typ.Varlen() {
@@ -527,25 +459,25 @@ func (p *parser) parseArgString(typ Type) (Arg, error) {
 	return MakeDataArg(typ, data), nil
 }
 
-func (p *parser) parseArgStruct(typ Type) (Arg, error) {
+func (target *Target) parseArgStruct(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	p.Parse('{')
 	t1, ok := typ.(*StructType)
 	if !ok {
-		p.eatExcessive(false, "wrong struct arg")
+		eatExcessive(p, false)
 		p.Parse('}')
-		return typ.DefaultArg(), nil
+		return typ.makeDefaultArg(), nil
 	}
 	var inner []Arg
 	for i := 0; p.Char() != '}'; i++ {
 		if i >= len(t1.Fields) {
-			p.eatExcessive(false, "excessive struct %v fields", typ.Name())
+			eatExcessive(p, false)
 			break
 		}
 		fld := t1.Fields[i]
 		if IsPad(fld) {
 			inner = append(inner, MakeConstArg(fld, 0))
 		} else {
-			arg, err := p.parseArg(fld)
+			arg, err := target.parseArg(fld, p, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -557,26 +489,22 @@ func (p *parser) parseArgStruct(typ Type) (Arg, error) {
 	}
 	p.Parse('}')
 	for len(inner) < len(t1.Fields) {
-		fld := t1.Fields[len(inner)]
-		if !IsPad(fld) {
-			p.strictFailf("missing struct %v fields %v/%v", typ.Name(), len(inner), len(t1.Fields))
-		}
-		inner = append(inner, fld.DefaultArg())
+		inner = append(inner, t1.Fields[len(inner)].makeDefaultArg())
 	}
 	return MakeGroupArg(typ, inner), nil
 }
 
-func (p *parser) parseArgArray(typ Type) (Arg, error) {
+func (target *Target) parseArgArray(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	p.Parse('[')
 	t1, ok := typ.(*ArrayType)
 	if !ok {
-		p.eatExcessive(false, "wrong array arg %T", typ)
+		eatExcessive(p, false)
 		p.Parse(']')
-		return typ.DefaultArg(), nil
+		return typ.makeDefaultArg(), nil
 	}
 	var inner []Arg
 	for i := 0; p.Char() != ']'; i++ {
-		arg, err := p.parseArg(t1.Type)
+		arg, err := target.parseArg(t1.Type, p, vars)
 		if err != nil {
 			return nil, err
 		}
@@ -588,19 +516,18 @@ func (p *parser) parseArgArray(typ Type) (Arg, error) {
 	p.Parse(']')
 	if t1.Kind == ArrayRangeLen && t1.RangeBegin == t1.RangeEnd {
 		for uint64(len(inner)) < t1.RangeBegin {
-			p.strictFailf("missing array elements")
-			inner = append(inner, t1.Type.DefaultArg())
+			inner = append(inner, t1.Type.makeDefaultArg())
 		}
 		inner = inner[:t1.RangeBegin]
 	}
 	return MakeGroupArg(typ, inner), nil
 }
 
-func (p *parser) parseArgUnion(typ Type) (Arg, error) {
+func (target *Target) parseArgUnion(typ Type, p *parser, vars map[string]*ResultArg) (Arg, error) {
 	t1, ok := typ.(*UnionType)
 	if !ok {
-		p.eatExcessive(true, "wrong union arg")
-		return typ.DefaultArg(), nil
+		eatExcessive(p, true)
+		return typ.makeDefaultArg(), nil
 	}
 	p.Parse('@')
 	name := p.Ident()
@@ -612,26 +539,25 @@ func (p *parser) parseArgUnion(typ Type) (Arg, error) {
 		}
 	}
 	if optType == nil {
-		p.eatExcessive(true, "wrong union option")
-		return typ.DefaultArg(), nil
+		eatExcessive(p, true)
+		return typ.makeDefaultArg(), nil
 	}
 	var opt Arg
 	if p.Char() == '=' {
 		p.Parse('=')
 		var err error
-		opt, err = p.parseArg(optType)
+		opt, err = target.parseArg(optType, p, vars)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		opt = optType.DefaultArg()
+		opt = optType.makeDefaultArg()
 	}
 	return MakeUnionArg(typ, opt), nil
 }
 
 // Eats excessive call arguments and struct fields to recover after description changes.
-func (p *parser) eatExcessive(stopAtComma bool, what string, args ...interface{}) {
-	p.strictFailf(what, args...)
+func eatExcessive(p *parser, stopAtComma bool) {
 	paren, brack, brace := 0, 0, 0
 	for !p.EOF() && p.e == nil {
 		ch := p.Char()
@@ -687,7 +613,7 @@ func (target *Target) serializeAddr(arg *PointerArg) string {
 	return fmt.Sprintf("(0x%x%v)", encodingAddrBase+arg.Address, ssize)
 }
 
-func (p *parser) parseAddr() (uint64, uint64, error) {
+func (target *Target) parseAddr(p *parser) (uint64, uint64, error) {
 	p.Parse('(')
 	pstr := p.Ident()
 	addr, err := strconv.ParseUint(pstr, 0, 64)
@@ -717,7 +643,6 @@ func (p *parser) parseAddr() (uint64, uint64, error) {
 		}
 		addr += off
 	}
-	target := p.target
 	maxMem := target.NumPages * target.PageSize
 	var vmaSize uint64
 	if p.Char() == '/' {
@@ -743,31 +668,28 @@ func (p *parser) parseAddr() (uint64, uint64, error) {
 	return addr, vmaSize, nil
 }
 
-func serializeData(buf *bytes.Buffer, data []byte, readable bool) {
-	if !readable && !isReadableData(data) {
+func serializeData(buf *bytes.Buffer, data []byte) {
+	readable := true
+	for _, v := range data {
+		if v >= 0x20 && v < 0x7f {
+			continue
+		}
+		switch v {
+		case 0, '\a', '\b', '\f', '\n', '\r', '\t', '\v':
+			continue
+		}
+		readable = false
+		break
+	}
+	if !readable || len(data) == 0 {
 		fmt.Fprintf(buf, "\"%v\"", hex.EncodeToString(data))
 		return
 	}
 	buf.WriteByte('\'')
-	encodeData(buf, data, true, false)
-	buf.WriteByte('\'')
-}
-
-func EncodeData(buf *bytes.Buffer, data []byte, readable bool) {
-	if !readable && isReadableData(data) {
-		readable = true
-	}
-	encodeData(buf, data, readable, true)
-}
-
-func encodeData(buf *bytes.Buffer, data []byte, readable, cstr bool) {
 	for _, v := range data {
-		if !readable {
-			lo, hi := byteToHex(v)
-			buf.Write([]byte{'\\', 'x', hi, lo})
-			continue
-		}
 		switch v {
+		case 0:
+			buf.Write([]byte{'\\', 'x', '0', '0'})
 		case '\a':
 			buf.Write([]byte{'\\', 'a'})
 		case '\b':
@@ -784,53 +706,16 @@ func encodeData(buf *bytes.Buffer, data []byte, readable, cstr bool) {
 			buf.Write([]byte{'\\', 'v'})
 		case '\'':
 			buf.Write([]byte{'\\', '\''})
-		case '"':
-			buf.Write([]byte{'\\', '"'})
 		case '\\':
 			buf.Write([]byte{'\\', '\\'})
 		default:
-			if isPrintable(v) {
-				buf.WriteByte(v)
-			} else {
-				if cstr {
-					// We would like to use hex encoding with \x,
-					// but C's \x is hard to use: it can contain _any_ number of hex digits
-					// (not just 2 or 4), so later non-hex encoded chars will glue to \x.
-					c0 := (v>>6)&0x7 + '0'
-					c1 := (v>>3)&0x7 + '0'
-					c2 := (v>>0)&0x7 + '0'
-					buf.Write([]byte{'\\', c0, c1, c2})
-				} else {
-					lo, hi := byteToHex(v)
-					buf.Write([]byte{'\\', 'x', hi, lo})
-				}
-			}
+			buf.WriteByte(v)
 		}
 	}
+	buf.WriteByte('\'')
 }
 
-func isReadableDataType(typ *BufferType) bool {
-	return typ.Kind == BufferString || typ.Kind == BufferFilename
-}
-
-func isReadableData(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	for _, v := range data {
-		if isPrintable(v) {
-			continue
-		}
-		switch v {
-		case 0, '\a', '\b', '\f', '\n', '\r', '\t', '\v':
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func (p *parser) deserializeData() ([]byte, error) {
+func deserializeData(p *parser) ([]byte, error) {
 	var data []byte
 	if p.Char() == '"' {
 		p.Parse('"')
@@ -859,11 +744,11 @@ func (p *parser) deserializeData() ([]byte, error) {
 			case 'x':
 				hi := p.consume()
 				lo := p.consume()
-				b, ok := hexToByte(lo, hi)
-				if !ok {
-					return nil, fmt.Errorf("invalid hex \\x%v%v in data arg", hi, lo)
+				if lo != '0' || hi != '0' {
+					return nil, fmt.Errorf(
+						"invalid \\x%c%c escape sequence in data arg", hi, lo)
 				}
-				data = append(data, b)
+				data = append(data, 0)
 			case 'a':
 				data = append(data, '\a')
 			case 'b':
@@ -880,8 +765,6 @@ func (p *parser) deserializeData() ([]byte, error) {
 				data = append(data, '\v')
 			case '\'':
 				data = append(data, '\'')
-			case '"':
-				data = append(data, '"')
 			case '\\':
 				data = append(data, '\\')
 			default:
@@ -893,47 +776,7 @@ func (p *parser) deserializeData() ([]byte, error) {
 	return data, nil
 }
 
-func isPrintable(v byte) bool {
-	return v >= 0x20 && v < 0x7f
-}
-
-func byteToHex(v byte) (lo, hi byte) {
-	return toHexChar(v & 0xf), toHexChar(v >> 4)
-}
-
-func hexToByte(lo, hi byte) (byte, bool) {
-	h, ok1 := fromHexChar(hi)
-	l, ok2 := fromHexChar(lo)
-	return h<<4 + l, ok1 && ok2
-}
-
-func toHexChar(v byte) byte {
-	if v >= 16 {
-		panic("bad hex char")
-	}
-	if v < 10 {
-		return '0' + v
-	}
-	return 'a' + v - 10
-}
-
-func fromHexChar(v byte) (byte, bool) {
-	if v >= '0' && v <= '9' {
-		return v - '0', true
-	}
-	if v >= 'a' && v <= 'f' {
-		return v - 'a' + 10, true
-	}
-	return 0, false
-}
-
 type parser struct {
-	target  *Target
-	strict  bool
-	vars    map[string]*ResultArg
-	autos   map[Arg]bool
-	comment string
-
 	r *bufio.Scanner
 	s string
 	i int
@@ -941,50 +784,10 @@ type parser struct {
 	e error
 }
 
-func newParser(target *Target, data []byte, strict bool) *parser {
-	p := &parser{
-		target: target,
-		strict: strict,
-		vars:   make(map[string]*ResultArg),
-		r:      bufio.NewScanner(bytes.NewReader(data)),
-	}
+func newParser(data []byte) *parser {
+	p := &parser{r: bufio.NewScanner(bytes.NewReader(data))}
 	p.r.Buffer(nil, maxLineLen)
 	return p
-}
-
-func (p *parser) auto(arg Arg) Arg {
-	if p.autos == nil {
-		p.autos = make(map[Arg]bool)
-	}
-	p.autos[arg] = true
-	return arg
-}
-
-func (p *parser) fixupAutos(prog *Prog) {
-	s := analyze(nil, nil, prog, nil)
-	for _, c := range prog.Calls {
-		p.target.assignSizesArray(c.Args, p.autos)
-		ForeachArg(c, func(arg Arg, _ *ArgCtx) {
-			if !p.autos[arg] {
-				return
-			}
-			delete(p.autos, arg)
-			switch typ := arg.Type().(type) {
-			case *ConstType:
-				arg.(*ConstArg).Val = typ.Val
-				_ = s
-			case *PtrType:
-				a := arg.(*PointerArg)
-				a.Address = s.ma.alloc(nil, a.Res.Size())
-			default:
-				panic(fmt.Sprintf("unsupported auto type %T", typ))
-
-			}
-		})
-	}
-	if len(p.autos) != 0 {
-		panic(fmt.Sprintf("leftoever autos: %+v", p.autos))
-	}
 }
 
 func (p *parser) Scan() bool {
@@ -1078,15 +881,7 @@ func (p *parser) Ident() string {
 }
 
 func (p *parser) failf(msg string, args ...interface{}) {
-	if p.e == nil {
-		p.e = fmt.Errorf("%v\nline #%v:%v: %v", fmt.Sprintf(msg, args...), p.l, p.i, p.s)
-	}
-}
-
-func (p *parser) strictFailf(msg string, args ...interface{}) {
-	if p.strict {
-		p.failf(msg, args...)
-	}
+	p.e = fmt.Errorf("%v\nline #%v: %v", fmt.Sprintf(msg, args...), p.l, p.s)
 }
 
 // CallSet returns a set of all calls in the program.

@@ -155,7 +155,11 @@ func (n *Type) Clone() Node {
 		Ident:     n.Ident,
 		String:    n.String,
 		HasString: n.HasString,
-		Colon:     cloneTypes(n.Colon),
+		HasColon:  n.HasColon,
+		Pos2:      n.Pos2,
+		Value2:    n.Value2,
+		Value2Fmt: n.Value2Fmt,
+		Ident2:    n.Ident2,
 		Args:      cloneTypes(n.Args),
 	}
 }

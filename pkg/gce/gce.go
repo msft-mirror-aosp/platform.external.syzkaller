@@ -92,7 +92,7 @@ func NewContext() (*Context, error) {
 	return ctx, nil
 }
 
-func (ctx *Context) CreateInstance(name, machineType, image, sshkey string, preemptible bool) (string, error) {
+func (ctx *Context) CreateInstance(name, machineType, image, sshkey string) (string, error) {
 	prefix := "https://www.googleapis.com/compute/v1/projects/" + ctx.ProjectID
 	sshkeyAttr := "syzkaller:" + sshkey
 	oneAttr := "1"
@@ -132,7 +132,7 @@ func (ctx *Context) CreateInstance(name, machineType, image, sshkey string, pree
 		},
 		Scheduling: &compute.Scheduling{
 			AutomaticRestart:  &falseAttr,
-			Preemptible:       preemptible,
+			Preemptible:       true,
 			OnHostMaintenance: "TERMINATE",
 		},
 	}
@@ -266,9 +266,8 @@ func (err resourcePoolExhaustedError) Error() string {
 }
 
 func (ctx *Context) waitForCompletion(typ, desc, opName string, ignoreNotFound bool) error {
-	time.Sleep(3 * time.Second)
 	for {
-		time.Sleep(3 * time.Second)
+		time.Sleep(2 * time.Second)
 		var op *compute.Operation
 		err := ctx.apiCall(func() (err error) {
 			switch typ {

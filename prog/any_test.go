@@ -20,7 +20,7 @@ func TestIsComplexPtr(t *testing.T) {
 	compl := make(map[string]bool)
 	for _, meta := range target.Syscalls {
 		for i := 0; i < iters; i++ {
-			s := newState(target, nil, nil)
+			s := newState(target, nil)
 			calls := r.generateParticularCall(s, meta)
 			p := &Prog{Target: target, Calls: calls}
 			for _, arg := range p.complexPtrs() {
@@ -50,7 +50,7 @@ func TestSquash(t *testing.T) {
 	}
 	for i, test := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			p, err := target.Deserialize([]byte(test.prog), Strict)
+			p, err := target.Deserialize([]byte(test.prog))
 			if err != nil {
 				t.Fatalf("failed to deserialize prog: %v", err)
 			}

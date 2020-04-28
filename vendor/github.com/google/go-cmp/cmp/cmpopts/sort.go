@@ -7,7 +7,6 @@ package cmpopts
 import (
 	"fmt"
 	"reflect"
-	"sort"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/internal/function"
@@ -25,14 +24,14 @@ import (
 // The less function does not have to be "total". That is, if !less(x, y) and
 // !less(y, x) for two elements x and y, their relative order is maintained.
 //
-// SortSlices can be used in conjunction with EquateEmpty.
-func SortSlices(lessFunc interface{}) cmp.Option {
-	vf := reflect.ValueOf(lessFunc)
+// SortSlices can be used in conjuction with EquateEmpty.
+func SortSlices(less interface{}) cmp.Option {
+	vf := reflect.ValueOf(less)
 	if !function.IsType(vf.Type(), function.Less) || vf.IsNil() {
-		panic(fmt.Sprintf("invalid less function: %T", lessFunc))
+		panic(fmt.Sprintf("invalid less function: %T", less))
 	}
 	ss := sliceSorter{vf.Type().In(0), vf}
-	return cmp.FilterValues(ss.filter, cmp.Transformer("cmpopts.SortSlices", ss.sort))
+	return cmp.FilterValues(ss.filter, cmp.Transformer("Sort", ss.sort))
 }
 
 type sliceSorter struct {
@@ -49,8 +48,8 @@ func (ss sliceSorter) filter(x, y interface{}) bool {
 	}
 	// Check whether the slices are already sorted to avoid an infinite
 	// recursion cycle applying the same transform to itself.
-	ok1 := sort.SliceIsSorted(x, func(i, j int) bool { return ss.less(vx, i, j) })
-	ok2 := sort.SliceIsSorted(y, func(i, j int) bool { return ss.less(vy, i, j) })
+	ok1 := sliceIsSorted(x, func(i, j int) bool { return ss.less(vx, i, j) })
+	ok2 := sliceIsSorted(y, func(i, j int) bool { return ss.less(vy, i, j) })
 	return !ok1 || !ok2
 }
 func (ss sliceSorter) sort(x interface{}) interface{} {
@@ -59,7 +58,7 @@ func (ss sliceSorter) sort(x interface{}) interface{} {
 	for i := 0; i < src.Len(); i++ {
 		dst.Index(i).Set(src.Index(i))
 	}
-	sort.SliceStable(dst.Interface(), func(i, j int) bool { return ss.less(dst, i, j) })
+	sortSliceStable(dst.Interface(), func(i, j int) bool { return ss.less(dst, i, j) })
 	ss.checkSort(dst)
 	return dst.Interface()
 }
@@ -96,14 +95,14 @@ func (ss sliceSorter) less(v reflect.Value, i, j int) bool {
 //	• Transitive: if !less(x, y) and !less(y, z), then !less(x, z)
 //	• Total: if x != y, then either less(x, y) or less(y, x)
 //
-// SortMaps can be used in conjunction with EquateEmpty.
-func SortMaps(lessFunc interface{}) cmp.Option {
-	vf := reflect.ValueOf(lessFunc)
+// SortMaps can be used in conjuction with EquateEmpty.
+func SortMaps(less interface{}) cmp.Option {
+	vf := reflect.ValueOf(less)
 	if !function.IsType(vf.Type(), function.Less) || vf.IsNil() {
-		panic(fmt.Sprintf("invalid less function: %T", lessFunc))
+		panic(fmt.Sprintf("invalid less function: %T", less))
 	}
 	ms := mapSorter{vf.Type().In(0), vf}
-	return cmp.FilterValues(ms.filter, cmp.Transformer("cmpopts.SortMaps", ms.sort))
+	return cmp.FilterValues(ms.filter, cmp.Transformer("Sort", ms.sort))
 }
 
 type mapSorter struct {
@@ -119,10 +118,7 @@ func (ms mapSorter) filter(x, y interface{}) bool {
 }
 func (ms mapSorter) sort(x interface{}) interface{} {
 	src := reflect.ValueOf(x)
-	outType := reflect.StructOf([]reflect.StructField{
-		{Name: "K", Type: src.Type().Key()},
-		{Name: "V", Type: src.Type().Elem()},
-	})
+	outType := mapEntryType(src.Type())
 	dst := reflect.MakeSlice(reflect.SliceOf(outType), src.Len(), src.Len())
 	for i, k := range src.MapKeys() {
 		v := reflect.New(outType).Elem()
@@ -130,7 +126,7 @@ func (ms mapSorter) sort(x interface{}) interface{} {
 		v.Field(1).Set(src.MapIndex(k))
 		dst.Index(i).Set(v)
 	}
-	sort.Slice(dst.Interface(), func(i, j int) bool { return ms.less(dst, i, j) })
+	sortSlice(dst.Interface(), func(i, j int) bool { return ms.less(dst, i, j) })
 	ms.checkSort(dst)
 	return dst.Interface()
 }
@@ -143,5 +139,8 @@ func (ms mapSorter) checkSort(v reflect.Value) {
 }
 func (ms mapSorter) less(v reflect.Value, i, j int) bool {
 	vx, vy := v.Index(i).Field(0), v.Index(j).Field(0)
+	if !hasReflectStructOf {
+		vx, vy = vx.Elem(), vy.Elem()
+	}
 	return ms.fnc.Call([]reflect.Value{vx, vy})[0].Bool()
 }

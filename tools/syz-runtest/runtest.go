@@ -15,7 +15,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -45,10 +44,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	testDir := filepath.Join(cfg.Syzkaller, "sys", target.OS, "test")
-	if err := testParsing(target, testDir); err != nil {
-		log.Fatal(err)
-	}
 	vmPool, err := vm.Create(cfg, *flagDebug)
 	if err != nil {
 		log.Fatal(err)
@@ -71,7 +66,7 @@ func main() {
 		reqMap:           make(map[int]*runtest.RunRequest),
 		lastReq:          make(map[string]int),
 	}
-	s, err := rpctype.NewRPCServer(cfg.RPC, "Manager", mgr)
+	s, err := rpctype.NewRPCServer(cfg.RPC, mgr)
 	if err != nil {
 		log.Fatalf("failed to create rpc server: %v", err)
 	}
@@ -116,13 +111,12 @@ func main() {
 		fmt.Printf("%-24v: %v calls enabled\n", sandbox+" sandbox", len(calls))
 	}
 	ctx := &runtest.Context{
-		Dir:          testDir,
+		Dir:          filepath.Join(cfg.Syzkaller, "sys", target.OS, "test"),
 		Target:       target,
 		Features:     mgr.checkResult.Features,
 		EnabledCalls: enabledCalls,
 		Requests:     mgr.requests,
 		LogFunc:      func(text string) { fmt.Println(text) },
-		Verbose:      false,
 	}
 	err = ctx.Run()
 	close(vm.Shutdown)
@@ -178,7 +172,7 @@ func (mgr *Manager) boot(name string, index int) (*report.Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to run fuzzer: %v", err)
 	}
-	rep := inst.MonitorExecution(outc, errc, mgr.reporter, vm.ExitNormal)
+	rep := inst.MonitorExecution(outc, errc, mgr.reporter, true)
 	return rep, nil
 }
 
@@ -272,24 +266,5 @@ func (mgr *Manager) Done(a *rpctype.RunTestDoneArgs, r *int) error {
 		req.Err = errors.New(a.Error)
 	}
 	close(req.Done)
-	return nil
-}
-
-func testParsing(target *prog.Target, dir string) error {
-	files, err := ioutil.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("failed to read %v: %v", dir, err)
-	}
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), "~") {
-			continue
-		}
-		if strings.HasSuffix(file.Name(), ".swp") {
-			continue
-		}
-		if err := runtest.TestParseProg(target, dir, file.Name()); err != nil {
-			return err
-		}
-	}
 	return nil
 }

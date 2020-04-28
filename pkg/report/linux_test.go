@@ -13,8 +13,7 @@ import (
 
 func TestLinuxIgnores(t *testing.T) {
 	cfg := &mgrconfig.Config{
-		TargetOS:   "linux",
-		TargetArch: "amd64",
+		TargetOS: "linux",
 	}
 	reporter, err := NewReporter(cfg)
 	if err != nil {
@@ -81,7 +80,7 @@ func TestLinuxSymbolizeLine(t *testing.T) {
 		},
 		{
 			"RIP: 0010:[<ffffffff8188c0e6>]  [<ffffffff8188c0e6>]  foo+0x101/0x185\n",
-			"RIP: 0010:[<ffffffff8188c0e6>]  [<ffffffff8188c0e6>]  foo+0x101/0x185 foo.c:550\n",
+			"RIP: 0010:[<ffffffff8188c0e6>]  [<ffffffff8188c0e6>]  foo+0x101/0x185 foo.c:555\n",
 		},
 		// Strip "./" file prefix.
 		{
@@ -161,13 +160,6 @@ func TestLinuxSymbolizeLine(t *testing.T) {
 					Line: 555,
 				},
 			}, nil
-		case 0x1000101:
-			return []symbolizer.Frame{
-				{
-					File: "/linux/foo.c",
-					Line: 550,
-				},
-			}, nil
 		case 0x1000110:
 			return []symbolizer.Frame{
 				{
@@ -220,7 +212,7 @@ func TestLinuxSymbolizeLine(t *testing.T) {
 	}
 	for i, test := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			result := symbolizeLine(symb, symbols, "vmlinux", "/linux", []byte(test.line))
+			result := symbolizeLine(symb, symbols, "vmlinux", "/linux/", []byte(test.line))
 			if test.result != string(result) {
 				t.Errorf("want %q\n\t     get %q", test.result, string(result))
 			}

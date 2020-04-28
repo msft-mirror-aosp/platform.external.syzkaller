@@ -5,97 +5,84 @@ package csource
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/prog"
 	_ "github.com/google/syzkaller/sys"
-	"github.com/google/syzkaller/sys/targets"
 )
 
 func TestGenerate(t *testing.T) {
 	t.Parallel()
-	checked := make(map[string]bool)
 	for _, target := range prog.AllTargets() {
-		target := target
-		sysTarget := targets.Get(target.OS, target.Arch)
-		if runtime.GOOS != sysTarget.BuildOS {
+		switch target.OS {
+		case "netbsd", "windows":
 			continue
 		}
+		target := target
 		t.Run(target.OS+"/"+target.Arch, func(t *testing.T) {
-			if target.OS == "linux" && target.Arch == "arm64" {
-				// Episodically fails on travis with:
-				// collect2: error: ld terminated with signal 11 [Segmentation fault]
+			if target.OS == "linux" && target.Arch == "arm" {
+				// This currently fails (at least with my arm-linux-gnueabihf-gcc-4.8) with:
+				// Assembler messages:
+				// Error: alignment too large: 15 assumed
+				t.Skip("broken")
+			}
+			if target.OS == "linux" && target.Arch == "386" {
+				// Currently fails on travis with:
+				// fatal error: asm/unistd.h: No such file or directory
 				t.Skip("broken")
 			}
 			if target.OS == "test" && target.PtrSize == 4 {
 				// The same reason as linux/32.
 				t.Skip("broken")
 			}
-			if _, err := exec.LookPath(sysTarget.CCompiler); err != nil {
-				t.Skipf("no target compiler %v", sysTarget.CCompiler)
-			}
-			full := !checked[target.OS]
-			checked[target.OS] = true
 			t.Parallel()
-			testTarget(t, target, full)
+			testTarget(t, target)
 		})
-
 	}
 }
 
-// This is the main configuration used by executor, so we want to test it as well.
-var executorOpts = Options{
-	Threaded:  true,
-	Collide:   true,
-	Repeat:    true,
-	Procs:     2,
-	Sandbox:   "none",
-	Repro:     true,
-	UseTmpDir: true,
-}
-
-func testTarget(t *testing.T, target *prog.Target, full bool) {
-	seed := time.Now().UnixNano()
-	if os.Getenv("TRAVIS") != "" {
-		seed = 0 // required for deterministic coverage reports
-	}
+func testTarget(t *testing.T, target *prog.Target) {
+	seed := int64(time.Now().UnixNano())
 	rs := rand.NewSource(seed)
 	t.Logf("seed=%v", seed)
-	p := target.Generate(rs, 10, nil)
-	// Turns out that fully minimized program can trigger new interesting warnings,
-	// e.g. about NULL arguments for functions that require non-NULL arguments in syz_ functions.
-	// We could append both AllSyzProg as-is and a minimized version of it,
-	// but this makes the NULL argument warnings go away (they showed up in ".constprop" versions).
-	// Testing 2 programs takes too long since we have lots of options permutations and OS/arch.
-	// So we use the as-is in short tests and minimized version in full tests.
-	syzProg := target.GenerateAllSyzProg(rs)
-	var opts []Options
-	if !full || testing.Short() {
-		p.Calls = append(p.Calls, syzProg.Calls...)
-		opts = allOptionsSingle(target.OS)
-		opts = append(opts, executorOpts)
-	} else {
-		minimized, _ := prog.Minimize(syzProg, -1, false, func(p *prog.Prog, call int) bool {
-			return len(p.Calls) == len(syzProg.Calls)
-		})
-		p.Calls = append(p.Calls, minimized.Calls...)
-		opts = allOptionsPermutations(target.OS)
+	r := rand.New(rs)
+	progs := []*prog.Prog{target.GenerateSimpleProg()}
+	if p := target.GenerateAllSyzProg(rs); len(p.Calls) != 0 {
+		progs = append(progs, p)
 	}
-	for opti, opts := range opts {
-		opts := opts
-		t.Run(fmt.Sprintf("%v", opti), func(t *testing.T) {
-			t.Parallel()
-			testOne(t, p, opts)
-		})
+	if !testing.Short() {
+		progs = append(progs, target.Generate(rs, 10, nil))
+	}
+	opts := allOptionsSingle(target.OS)
+	opts = append(opts, Options{
+		Threaded:  true,
+		Collide:   true,
+		Repeat:    true,
+		Procs:     2,
+		Sandbox:   "none",
+		Repro:     true,
+		UseTmpDir: true,
+	})
+	allPermutations := allOptionsPermutations(target.OS)
+	if testing.Short() {
+		for i := 0; i < 16; i++ {
+			opts = append(opts, allPermutations[r.Intn(len(allPermutations))])
+		}
+	} else {
+		opts = allPermutations
+	}
+	for pi, p := range progs {
+		for opti, opts := range opts {
+			p, opts := p, opts
+			t.Run(fmt.Sprintf("%v/%v", pi, opti), func(t *testing.T) {
+				t.Parallel()
+				testOne(t, p, opts)
+			})
+		}
 	}
 }
 
@@ -107,48 +94,11 @@ func testOne(t *testing.T, p *prog.Prog, opts Options) {
 	}
 	bin, err := Build(p.Target, src)
 	if err != nil {
+		if strings.Contains(err.Error(), "no target compiler") {
+			t.Skip(err)
+		}
 		t.Logf("opts: %+v\nprogram:\n%s\n", opts, p.Serialize())
 		t.Fatalf("%v", err)
 	}
 	defer os.Remove(bin)
-}
-
-func TestSysTests(t *testing.T) {
-	t.Parallel()
-	for _, target := range prog.AllTargets() {
-		target := target
-		sysTarget := targets.Get(target.OS, target.Arch)
-		if runtime.GOOS != sysTarget.BuildOS {
-			continue // we need at least preprocessor binary to generate sources
-		}
-		t.Run(target.OS+"/"+target.Arch, func(t *testing.T) {
-			t.Parallel()
-			dir := filepath.Join("..", "..", "sys", target.OS, "test")
-			if !osutil.IsExist(dir) {
-				return
-			}
-			files, err := ioutil.ReadDir(dir)
-			if err != nil {
-				t.Fatalf("failed to read %v: %v", dir, err)
-			}
-			for _, finfo := range files {
-				file := filepath.Join(dir, finfo.Name())
-				if strings.HasSuffix(file, "~") || strings.HasSuffix(file, ".swp") {
-					continue
-				}
-				data, err := ioutil.ReadFile(file)
-				if err != nil {
-					t.Fatalf("failed to read %v: %v", file, err)
-				}
-				p, err := target.Deserialize(data, prog.Strict)
-				if err != nil {
-					t.Fatalf("failed to parse program %v: %v", file, err)
-				}
-				_, err = Write(p, executorOpts)
-				if err != nil {
-					t.Fatalf("failed to generate C source for %v: %v", file, err)
-				}
-			}
-		})
-	}
 }

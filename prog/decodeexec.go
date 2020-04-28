@@ -52,8 +52,7 @@ type ExecArgResult struct {
 }
 
 type ExecArgData struct {
-	Data     []byte
-	Readable bool
+	Data []byte
 }
 
 type ExecArgCsum struct {
@@ -110,9 +109,6 @@ func (dec *execDecoder) parse() {
 				Addr:  dec.read(),
 				Size:  dec.read(),
 			})
-		case execInstrEOF:
-			dec.commitCall()
-			return
 		default:
 			dec.commitCall()
 			if instr >= uint64(len(dec.target.Syscalls)) {
@@ -130,6 +126,9 @@ func (dec *execDecoder) parse() {
 					return
 				}
 			}
+		case execInstrEOF:
+			dec.commitCall()
+			return
 		}
 	}
 }
@@ -162,12 +161,8 @@ func (dec *execDecoder) readArg() ExecArg {
 		dec.vars[arg.Index] = arg.Default
 		return arg
 	case execArgData:
-		flags := dec.read()
-		size := flags & ^execArgDataReadable
-		readable := flags&execArgDataReadable != 0
 		return ExecArgData{
-			Data:     dec.readBlob(size),
-			Readable: readable,
+			Data: dec.readBlob(dec.read()),
 		}
 	case execArgCsum:
 		size := dec.read()

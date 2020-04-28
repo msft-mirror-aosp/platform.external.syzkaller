@@ -6,7 +6,6 @@
 package dash
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -37,25 +36,20 @@ func TestReportBug(t *testing.T) {
 	resp, _ = c.client.ReportingPollBugs("test")
 	c.expectEQ(len(resp.Reports), 1)
 	rep := resp.Reports[0]
-	c.expectNE(rep.ID, "")
+	if rep.ID == "" {
+		t.Fatalf("empty report ID")
+	}
 	_, dbCrash, dbBuild := c.loadBug(rep.ID)
 	want := &dashapi.BugReport{
-		Type:              dashapi.ReportNew,
 		Namespace:         "test1",
 		Config:            []byte(`{"Index":1}`),
 		ID:                rep.ID,
-		OS:                "linux",
-		Arch:              "amd64",
-		VMArch:            "amd64",
 		First:             true,
-		Moderation:        true,
 		Title:             "title1",
-		Link:              fmt.Sprintf("https://testapp.appspot.com/bug?extid=%v", rep.ID),
-		CreditEmail:       fmt.Sprintf("syzbot+%v@testapp.appspotmail.com", rep.ID),
 		Maintainers:       []string{"bar@foo.com", "foo@bar.com"},
 		CompilerID:        "compiler1",
 		KernelRepo:        "repo1",
-		KernelRepoAlias:   "repo1 branch1",
+		KernelRepoAlias:   "repo1/branch1",
 		KernelBranch:      "branch1",
 		KernelCommit:      "1111111111111111111111111111111111111111",
 		KernelCommitTitle: build.KernelCommitTitle,
@@ -68,9 +62,9 @@ func TestReportBug(t *testing.T) {
 		ReportLink:        externalLink(c.ctx, textCrashReport, dbCrash.Report),
 		CrashID:           rep.CrashID,
 		NumCrashes:        1,
-		HappenedOn:        []string{"repo1 branch1"},
+		HappenedOn:        []string{"repo1/branch1"},
 	}
-	c.expectEQ(want, rep)
+	c.expectEQ(rep, want)
 
 	// Since we did not update bug status yet, should get the same report again.
 	c.expectEQ(c.client.pollBug(), want)
@@ -78,19 +72,20 @@ func TestReportBug(t *testing.T) {
 	// Now add syz repro and check that we get another bug report.
 	crash1.ReproOpts = []byte("some opts")
 	crash1.ReproSyz = []byte("getpid()")
-	want.Type = dashapi.ReportRepro
 	want.First = false
 	want.ReproSyz = []byte(syzReproPrefix + "#some opts\ngetpid()")
 	c.client.ReportCrash(crash1)
 	rep1 := c.client.pollBug()
-	c.expectNE(want.CrashID, rep1.CrashID)
+	if want.CrashID == rep1.CrashID {
+		t.Fatal("get the same CrashID for new crash")
+	}
 	_, dbCrash, _ = c.loadBug(rep.ID)
 	want.CrashID = rep1.CrashID
 	want.NumCrashes = 2
 	want.ReproSyzLink = externalLink(c.ctx, textReproSyz, dbCrash.ReproSyz)
 	want.LogLink = externalLink(c.ctx, textCrashLog, dbCrash.Log)
 	want.ReportLink = externalLink(c.ctx, textCrashReport, dbCrash.Report)
-	c.expectEQ(want, rep1)
+	c.expectEQ(rep1, want)
 
 	reply, _ := c.client.ReportingUpdate(&dashapi.BugUpdate{
 		ID:         rep.ID,
@@ -117,17 +112,14 @@ func TestReportBug(t *testing.T) {
 
 	// Check that we get the report in the second reporting.
 	rep2 := c.client.pollBug()
-	c.expectNE(rep2.ID, "")
-	c.expectNE(rep2.ID, rep.ID)
-	want.Type = dashapi.ReportNew
+	if rep2.ID == "" || rep2.ID == rep.ID {
+		t.Fatalf("bad report ID: %q", rep2.ID)
+	}
 	want.ID = rep2.ID
-	want.Link = fmt.Sprintf("https://testapp.appspot.com/bug?extid=%v", rep2.ID)
-	want.CreditEmail = fmt.Sprintf("syzbot+%v@testapp.appspotmail.com", rep2.ID)
 	want.First = true
-	want.Moderation = false
 	want.Config = []byte(`{"Index":2}`)
 	want.NumCrashes = 3
-	c.expectEQ(want, rep2)
+	c.expectEQ(rep2, want)
 
 	// Check that that we can't upstream the bug in the final reporting.
 	reply, _ = c.client.ReportingUpdate(&dashapi.BugUpdate{
@@ -186,24 +178,19 @@ func TestInvalidBug(t *testing.T) {
 
 	// Now it should be reported again.
 	rep = c.client.pollBug()
-	c.expectNE(rep.ID, "")
+	if rep.ID == "" {
+		t.Fatalf("empty report ID")
+	}
 	_, dbCrash, dbBuild := c.loadBug(rep.ID)
 	want := &dashapi.BugReport{
-		Type:              dashapi.ReportNew,
 		Namespace:         "test1",
 		Config:            []byte(`{"Index":1}`),
 		ID:                rep.ID,
-		OS:                "linux",
-		Arch:              "amd64",
-		VMArch:            "amd64",
 		First:             true,
-		Moderation:        true,
 		Title:             "title1 (2)",
-		Link:              fmt.Sprintf("https://testapp.appspot.com/bug?extid=%v", rep.ID),
-		CreditEmail:       fmt.Sprintf("syzbot+%v@testapp.appspotmail.com", rep.ID),
 		CompilerID:        "compiler1",
 		KernelRepo:        "repo1",
-		KernelRepoAlias:   "repo1 branch1",
+		KernelRepoAlias:   "repo1/branch1",
 		KernelBranch:      "branch1",
 		KernelCommit:      "1111111111111111111111111111111111111111",
 		KernelCommitTitle: build.KernelCommitTitle,
@@ -218,9 +205,9 @@ func TestInvalidBug(t *testing.T) {
 		ReproCLink:        externalLink(c.ctx, textReproC, dbCrash.ReproC),
 		CrashID:           rep.CrashID,
 		NumCrashes:        1,
-		HappenedOn:        []string{"repo1 branch1"},
+		HappenedOn:        []string{"repo1/branch1"},
 	}
-	c.expectEQ(want, rep)
+	c.expectEQ(rep, want)
 	c.client.ReportFailedRepro(testCrashID(crash1))
 }
 
@@ -359,6 +346,7 @@ func TestReportingDupCrossReporting(t *testing.T) {
 	cmds := []*dashapi.BugUpdate{
 		{ID: rep1.ID, DupOf: rep1.ID},
 		{ID: rep1.ID, DupOf: rep2.ID},
+		{ID: rep1.ID, DupOf: rep3.ID},
 		{ID: rep2.ID, DupOf: rep1.ID},
 		{ID: rep2.ID, DupOf: rep2.ID},
 		{ID: rep2.ID, DupOf: rep3.ID},
@@ -372,15 +360,6 @@ func TestReportingDupCrossReporting(t *testing.T) {
 		reply, _ := c.client.ReportingUpdate(cmd)
 		c.expectEQ(reply.OK, false)
 	}
-	// Special case of cross-reporting duping:
-	cmd := &dashapi.BugUpdate{
-		Status: dashapi.BugStatusDup,
-		ID:     rep1.ID,
-		DupOf:  rep3.ID,
-	}
-	t.Logf("duping %v -> %v", cmd.ID, cmd.DupOf)
-	reply, _ := c.client.ReportingUpdate(cmd)
-	c.expectTrue(reply.OK)
 }
 
 func TestReportingFilter(t *testing.T) {
@@ -391,7 +370,7 @@ func TestReportingFilter(t *testing.T) {
 	c.client.UploadBuild(build)
 
 	crash1 := testCrash(build, 1)
-	crash1.Title = "skip with repro 1"
+	crash1.Title = "skip without repro 1"
 	c.client.ReportCrash(crash1)
 
 	// This does not skip first reporting, because it does not have repro.
@@ -414,7 +393,7 @@ func TestReportingFilter(t *testing.T) {
 
 	// Now report a bug that must go to the second reporting right away.
 	crash2 := testCrash(build, 2)
-	crash2.Title = "skip with repro 2"
+	crash2.Title = "skip without repro 2"
 	crash2.ReproSyz = []byte("getpid()")
 	c.client.ReportCrash(crash2)
 

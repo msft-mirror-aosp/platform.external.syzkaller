@@ -5,7 +5,6 @@
 package build
 
 import (
-	"bytes"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -24,8 +23,7 @@ import (
 //  - kernel: kernel for injected boot
 //  - initrd: initrd for injected boot
 //  - kernel.config: actual kernel config used during build
-//  - obj/: directory with kernel object files (this should match KernelObject
-//    specified in sys/targets, e.g. vmlinux for linux)
+//  - obj/: directory with kernel object files (e.g. vmlinux for linux)
 func Image(targetOS, targetArch, vmType, kernelDir, outputDir, compiler, userspaceDir,
 	cmdlineFile, sysctlFile string, config []byte) error {
 	builder, err := getBuilder(targetOS, targetArch, vmType)
@@ -41,8 +39,7 @@ func Image(targetOS, targetArch, vmType, kernelDir, outputDir, compiler, userspa
 			return fmt.Errorf("failed to write config file: %v", err)
 		}
 	}
-	err = builder.build(targetArch, vmType, kernelDir, outputDir, compiler, userspaceDir, cmdlineFile, sysctlFile, config)
-	return extractRootCause(err)
+	return builder.build(targetArch, vmType, kernelDir, outputDir, compiler, userspaceDir, cmdlineFile, sysctlFile, config)
 }
 
 func Clean(targetOS, targetArch, vmType, kernelDir string) error {
@@ -50,7 +47,7 @@ func Clean(targetOS, targetArch, vmType, kernelDir string) error {
 	if err != nil {
 		return err
 	}
-	return builder.clean(kernelDir, targetArch)
+	return builder.clean(kernelDir)
 }
 
 type KernelBuildError struct {
@@ -60,47 +57,30 @@ type KernelBuildError struct {
 type builder interface {
 	build(targetArch, vmType, kernelDir, outputDir, compiler, userspaceDir,
 		cmdlineFile, sysctlFile string, config []byte) error
-	clean(kernelDir, targetArch string) error
+	clean(kernelDir string) error
 }
 
 func getBuilder(targetOS, targetArch, vmType string) (builder, error) {
-	var supported = []struct {
-		OS   string
-		arch string
-		vms  []string
-		b    builder
-	}{
-		{"linux", "amd64", []string{"gvisor"}, gvisor{}},
-		{"linux", "amd64", []string{"gce", "qemu"}, linux{}},
-		{"linux", "ppc64le", []string{"qemu"}, linux{}},
-		{"fuchsia", "amd64", []string{"qemu"}, fuchsia{}},
-		{"fuchsia", "arm64", []string{"qemu"}, fuchsia{}},
-		{"akaros", "amd64", []string{"qemu"}, akaros{}},
-		{"openbsd", "amd64", []string{"gce", "vmm"}, openbsd{}},
-		{"netbsd", "amd64", []string{"gce", "qemu"}, netbsd{}},
-		{"freebsd", "amd64", []string{"gce", "qemu"}, freebsd{}},
+	switch {
+	case targetOS == "linux" && targetArch == "amd64" && vmType == "gvisor":
+		return gvisor{}, nil
+	case targetOS == "linux" && targetArch == "amd64" && (vmType == "qemu" || vmType == "gce"):
+		return linux{}, nil
+	case targetOS == "fuchsia" && (targetArch == "amd64" || targetArch == "arm64") && vmType == "qemu":
+		return fuchsia{}, nil
+	case targetOS == "akaros" && targetArch == "amd64" && vmType == "qemu":
+		return akaros{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported image type %v/%v/%v", targetOS, targetArch, vmType)
 	}
-	for _, s := range supported {
-		if targetOS == s.OS && targetArch == s.arch {
-			for _, vm := range s.vms {
-				if vmType == vm {
-					return s.b, nil
-				}
-			}
-		}
-	}
-	return nil, fmt.Errorf("unsupported image type %v/%v/%v", targetOS, targetArch, vmType)
 }
 
 func CompilerIdentity(compiler string) (string, error) {
 	if compiler == "" {
 		return "", nil
 	}
-
-	bazel := strings.HasSuffix(compiler, "bazel")
-
 	arg := "--version"
-	if bazel {
+	if strings.HasSuffix(compiler, "bazel") {
 		arg = ""
 	}
 	output, err := osutil.RunCmd(time.Minute, "", compiler, arg)
@@ -108,70 +88,10 @@ func CompilerIdentity(compiler string) (string, error) {
 		return "", err
 	}
 	for _, line := range strings.Split(string(output), "\n") {
-		if bazel {
-			// Strip extracting and log lines...
-			if strings.Contains(line, "Extracting Bazel") {
-				continue
-			}
-			if strings.HasPrefix(line, "INFO: ") {
-				continue
-			}
-			if strings.HasPrefix(line, "WARNING: ") {
-				continue
-			}
+		if strings.Contains(line, "Extracting Bazel") {
+			continue
 		}
-
 		return strings.TrimSpace(line), nil
 	}
 	return "", fmt.Errorf("no output from compiler --version")
-}
-
-func extractRootCause(err error) error {
-	if err == nil {
-		return nil
-	}
-	verr, ok := err.(*osutil.VerboseError)
-	if !ok {
-		return err
-	}
-	cause := extractCauseInner(verr.Output)
-	if cause != nil {
-		verr.Title = string(cause)
-	}
-	return KernelBuildError{verr}
-}
-
-func extractCauseInner(s []byte) []byte {
-	var cause []byte
-	for _, line := range bytes.Split(s, []byte{'\n'}) {
-		for _, pattern := range buildFailureCauses {
-			if pattern.weak && cause != nil {
-				continue
-			}
-			if bytes.Contains(line, pattern.pattern) {
-				cause = line
-				if pattern.weak {
-					break
-				}
-				return cause
-			}
-		}
-	}
-	return cause
-}
-
-type buildFailureCause struct {
-	pattern []byte
-	weak    bool
-}
-
-var buildFailureCauses = [...]buildFailureCause{
-	{pattern: []byte(": error: ")},
-	{pattern: []byte("ERROR: ")},
-	{pattern: []byte(": fatal error: ")},
-	{pattern: []byte(": undefined reference to")},
-	{pattern: []byte(": Permission denied")},
-	{weak: true, pattern: []byte(": final link failed: ")},
-	{weak: true, pattern: []byte("collect2: error: ")},
-	{weak: true, pattern: []byte("FAILED: Build did NOT complete")},
 }

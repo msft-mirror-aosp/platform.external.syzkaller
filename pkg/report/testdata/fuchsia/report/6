@@ -1,5 +1,4 @@
-TITLE: KERNEL PANIC in corrupted
-CORRUPTED: Y
+TITLE: KERNEL PANIC
 SUPPRESSED: Y
 
 This is meant to be suppressed "lost connection", but they are not detected

@@ -13,10 +13,13 @@ func TestResourceCtors(t *testing.T) {
 		t.Skip("too slow")
 	}
 	testEachTarget(t, func(t *testing.T, target *Target) {
-		expectFail := false
-		for _, res := range target.Resources {
-			if len(target.calcResourceCtors(res, true)) == 0 != expectFail {
-				t.Errorf("resource %v can't be created", res.Name)
+		for _, c := range target.Syscalls {
+			for _, res := range target.inputResources(c) {
+				if len(target.calcResourceCtors(res.Kind, true)) == 0 {
+					t.Errorf("call %v requires input resource %v,"+
+						" but there are no calls that can create this resource",
+						c.Name, res.Name)
+				}
 			}
 		}
 	})
@@ -49,10 +52,8 @@ func TestTransitivelyEnabledCalls(t *testing.T) {
 			if len(enabled) != len(target.Syscalls) {
 				t.Errorf("some calls are disabled: %v/%v", len(enabled), len(target.Syscalls))
 			}
-			if len(disabled) != 0 {
-				for c, reason := range disabled {
-					t.Errorf("disabled %v: %v", c.Name, reason)
-				}
+			for c, reason := range disabled {
+				t.Errorf("disabled %v: %v", c.Name, reason)
 			}
 		}
 	})

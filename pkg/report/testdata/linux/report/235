@@ -1,5 +1,4 @@
-TITLE: INFO: task hung in corrupted
-TYPE: HANG
+TITLE: INFO: task hung in should_fail
 CORRUPTED: Y
 
 [  246.707981] FAULT_INJECTION: forcing a failure.

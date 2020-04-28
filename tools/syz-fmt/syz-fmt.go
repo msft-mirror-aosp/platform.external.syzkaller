@@ -13,23 +13,14 @@ import (
 	"strings"
 
 	"github.com/google/syzkaller/pkg/ast"
-	"github.com/google/syzkaller/pkg/osutil"
-	"github.com/google/syzkaller/sys/targets"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: syz-fmt files... or dirs... or all\n")
+		fmt.Fprintf(os.Stderr, "usage: syz-fmt files... or dirs...\n")
 		os.Exit(1)
 	}
-	args := os.Args[1:]
-	if len(args) == 1 && args[0] == "all" {
-		args = nil
-		for os := range targets.List {
-			args = append(args, filepath.Join("sys", os))
-		}
-	}
-	for _, arg := range args {
+	for _, arg := range os.Args[1:] {
 		st, err := os.Stat(arg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to stat %v: %v\n", arg, err)
@@ -68,7 +59,7 @@ func processFile(file string, mode os.FileMode) {
 		return
 	}
 	fmt.Printf("reformatting %v\n", file)
-	if err := osutil.Rename(file, file+"~"); err != nil {
+	if err := os.Rename(file, file+"~"); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}

@@ -35,12 +35,6 @@ table td, table th {
 	overflow: hidden;
 }
 
-.namespace {
-	font-weight: bold;
-	font-size: large;
-	color: #375EAB;
-}
-
 .position_table {
 	border: 0px;
 	margin: 0px;
@@ -65,7 +59,7 @@ table td, table th {
 	background: #F4F4F4;
 }
 
-.list_table tr:nth-child(2n) {
+.list_table tr:nth-child(2n+1) {
 	background: #F4F4F4;
 }
 
@@ -83,16 +77,11 @@ table td, table th {
 	max-width: 350pt;
 }
 
-.list_table .commit_list {
-	width: 500pt;
-	max-width: 500pt;
-}
-
 .list_table .tag {
 	font-family: monospace;
 	font-size: 8pt;
-	width: 40pt;
-	max-width: 40pt;
+	width: 200pt;
+	max-width: 200pt;
 }
 
 .list_table .opts {
@@ -112,8 +101,8 @@ table td, table th {
 }
 
 .list_table .kernel {
-	width: 80pt;
-	max-width: 80pt;
+	width: 60pt;
+	max-width: 60pt;
 }
 
 .list_table .maintainers {
@@ -127,29 +116,10 @@ table td, table th {
 }
 
 .list_table .stat {
-	width: 55pt;
-	max-width: 55pt;
+	width: 50pt;
+	max-width: 50pt;
 	font-family: monospace;
 	text-align: right;
-}
-
-.list_table .date {
-	width: 60pt;
-	max-width: 60pt;
-	font-family: monospace;
-	text-align: right;
-}
-
-.list_table .stat_name {
-	width: 150pt;
-	max-width: 150pt;
-	font-family: monospace;
-}
-
-.list_table .stat_value {
-	width: 120pt;
-	max-width: 120pt;
-	font-family: monospace;
 }
 
 .bad {
@@ -157,19 +127,7 @@ table td, table th {
 	font-weight: bold;
 }
 
-.inactive {
-	color: #888;
-}
-
-.plain {
-	text-decoration: none;
-}
-
 textarea {
 	width:100%;
-	font-family: monospace;
-}
-
-.mono {
 	font-family: monospace;
 }

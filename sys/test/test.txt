@@ -3,18 +3,11 @@
 
 # Syscalls used in syzkaller tests.
 
-syz_execute_func(text ptr[in, text[target]])
-
 test()
 
 # Integer types.
 
 test$int(a0 intptr, a1 int8, a2 int16, a3 int32, a4 int64)
-
-# String types.
-
-test$str0(a ptr[in, string])
-test$blob0(a ptr[in, array[int8]])
 
 # Opt arguments
 
@@ -430,58 +423,6 @@ test$length27(a0 ptr[in, explicitly_sized], a1 len[a0])
 test$length28(a0 ptr[in, explicitly_sized_union], a1 len[a0])
 test$length29(a ptr[in, static_filename])
 
-len_expr1 {
-	f11	len_expr2
-	f12	bytesize[syscall:a2, int32]
-}
-
-len_expr2 {
-	f21	len_expr3
-	f22	len_expr4
-	f23	ptr[in, len_expr4]
-	f24	ptr[in, ptr[in, len_expr4]]
-	f25	len[f21:f31, int32]
-}
-
-len_expr3 {
-	f31	int16
-	f32	bytesize[len_expr2:f21, int32]
-	f33	bytesize[len_expr2:f22:f41, int32]
-	f34	bytesize[len_expr1:f11:f22:f42, int32]
-	f35	bytesize[len_expr2:f23:f43, int32]
-	f36	bytesize[len_expr2:f24:f44, int32]
-}
-
-len_expr4 {
-	f41	array[int8, 1]
-	f42	array[int8, 3]
-	f43	array[int8, 5]
-	f44	array[int8, 6]
-}
-
-test$length30(a0 ptr[in, len_expr1], a1 bytesize[a0:f11], a2 ptr[in, bytesize[a0:f11:f21, int32]], a3 bytesize[a0:f11:f21:f31])
-
-test$offsetof0(a0 ptr[in, offsetof0])
-
-offsetof0 {
-	f0	int32
-	f1	int8
-	f2	int16
-	f3	int8
-	f4	int64
-	f5	int32:5
-	f6	int32:10
-	f7	int64
-	o0	offsetof[f0, int32]
-	o1	offsetof[f1, int32]
-	o2	offsetof[f2, int32]
-	o3	offsetof[f3, int32]
-	o4	offsetof[f4, int32]
-	o5	offsetof[f5, int32]
-	o6	offsetof[f6, int32]
-	o7	offsetof[f7, int32]
-}
-
 # Big endian
 
 test$end0(a0 ptr[in, syz_end_int_struct])
@@ -566,22 +507,6 @@ syz_bf_struct1_internal {
 syz_bf_struct1 {
 	f0	syz_bf_struct1_internal
 	f1	int8
-}
-
-syz_bf_struct2 {
-	f0	int64:4
-	f1	int64:8
-	f2	int64:12
-	f3	int64:20
-	f4	int64:16
-}
-
-syz_bf_struct3 {
-	f0	int64be:4
-	f1	int64be:8
-	f2	int64be:12
-	f3	int64be:20
-	f4	int64be:16
 }
 
 test$bf0(a0 ptr[in, syz_bf_struct0])
@@ -694,7 +619,7 @@ test$recur2(a0 ptr[inout, syz_recur_2])
 
 # Resources.
 
-resource fd[int32]: 0xffffffffffffffff, 999
+resource fd[int32]: 0xffffffffffffffff
 resource syz_res[int32]: 0xffff
 
 test$res0() syz_res
@@ -734,25 +659,7 @@ mutate6(fd fd, data ptr[in, array[int8]], size bytesize[data])
 mutate7(a0 ptr[in, string], a1 len[a0])
 mutate8(a0 proc[100, 4, opt])
 
-# Test for arguments mutation
-mutate$integer(b1 bool8, b2 bool8, b3 bool8, b4 bool8, b5 bool8, b6 bool8, b7 bool8, b8 bool8, i9 int64)
-mutate$integer2(b1 bool64, i1 int64, i2 int32, i3 int16[0x0:0x8], i4 int8[0x0:0x8])
-mutate$flags(filename ptr[in, filename], i1 int64, b1 bool16, flags flags[bitmask_flags])
-mutate$flags2(filename ptr[in, filename], flags flags[bitmask_flags2])
-mutate$flags3(filename ptr[in, filename], flags flags[open_flags2])
-mutate$array(i1 int64, i2 int64[0x0:0x1fffffff], vec ptr[in, array[int32[0:1]]])
-mutate$array2(vec ptr[in, array[syz_struct1]])
-mutate$union(p ptr[in, syz_union0])
-
 open_flags = 0xabababababababab, 0xcdcdcdcdcdcdcdcd
-open_flags2 = 0xaaaaaaaaaaaaaaaa, 0xaaaaaaaabbbbbbbb, 0xbbbbbbbbbbbbbbbb, 0xbbbbbbbbcccccccc, 0xcccccccccccccccc, 0xccccccccdddddddd, 0xdddddddddddddddd, 0xddddddddeeeeeeee, 0xeeeeeeeeeeeeeeee, 0xeeeeeeeeffffffff, 0xffffffffffffffff
-
-bitmask_flags = 0x1, 0x8, 0x10
-bitmask_flags2 = 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80
-
-# Minimization tests.
-
-minimize$0(a0 proc[10, 2], a1 proc[10, 2, opt])
 
 # Serialization tests.
 
@@ -772,21 +679,3 @@ resource unsupported[int32]
 
 unsupported$0(a unsupported) unsupported
 unsupported$1(a unsupported) unsupported
-
-foo$arch_specific_const_as_array_size(a ptr[in, array[int8, ARCH_64_SPECIFIC_CONST]])
-
-# Fallback coverage.
-
-fallback$0() fd
-fallback$1(a fd)
-seccomp()
-
-# AUTO
-
-test$auto0(a const[0x42], b ptr[in, auto_struct0], c len[b], d int32)
-
-auto_struct0 {
-	f0	len[parent, int32]
-	f1	const[0x43, int32]
-	f2	int32
-}

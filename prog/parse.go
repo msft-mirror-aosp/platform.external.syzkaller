@@ -26,7 +26,7 @@ func (target *Target) ParseLog(data []byte) []*LogEntry {
 	for pos := 0; pos < len(data); {
 		nl := bytes.IndexByte(data[pos:], '\n')
 		if nl == -1 {
-			nl = len(data) - 1
+			nl = len(data)
 		} else {
 			nl += pos
 		}
@@ -55,7 +55,7 @@ func (target *Target) ParseLog(data []byte) []*LogEntry {
 			continue
 		}
 		tmp := append(cur, line...)
-		p, err := target.Deserialize(tmp, NonStrict)
+		p, err := target.Deserialize(tmp)
 		if err != nil {
 			continue
 		}

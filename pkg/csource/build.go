@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"runtime"
 
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/prog"
@@ -18,23 +17,15 @@ import (
 
 // Build builds a C program from source src and returns name of the resulting binary.
 func Build(target *prog.Target, src []byte) (string, error) {
-	return build(target, src, "", true)
-}
-
-// BuildNoWarn is the same as Build, but ignores all compilation warnings.
-// Should not be used in tests, but may be used e.g. when we are bisecting and potentially
-// using an old repro with newer compiler, or a compiler that we never seen before.
-// In these cases it's more important to build successfully.
-func BuildNoWarn(target *prog.Target, src []byte) (string, error) {
-	return build(target, src, "", false)
+	return build(target, src, "")
 }
 
 // BuildFile builds a C/C++ program from file src and returns name of the resulting binary.
 func BuildFile(target *prog.Target, src string) (string, error) {
-	return build(target, nil, src, true)
+	return build(target, nil, src)
 }
 
-func build(target *prog.Target, src []byte, file string, warn bool) (string, error) {
+func build(target *prog.Target, src []byte, file string) (string, error) {
 	sysTarget := targets.Get(target.OS, target.Arch)
 	compiler := sysTarget.CCompiler
 	if _, err := exec.LookPath(compiler); err != nil {
@@ -48,10 +39,9 @@ func build(target *prog.Target, src []byte, file string, warn bool) (string, err
 	}
 
 	flags := []string{
-		"-o", bin,
+		"-Wall", "-Werror", "-O1", "-g", "-o", bin, "-pthread",
 		"-DGOOS_" + target.OS + "=1",
 		"-DGOARCH_" + target.Arch + "=1",
-		"-DHOSTGOOS_" + runtime.GOOS + "=1",
 	}
 	if file == "" {
 		flags = append(flags, "-x", "c", "-")
@@ -62,9 +52,6 @@ func build(target *prog.Target, src []byte, file string, warn bool) (string, err
 	if sysTarget.PtrSize == 4 {
 		// We do generate uint64's for syscall arguments that overflow longs on 32-bit archs.
 		flags = append(flags, "-Wno-overflow")
-	}
-	if !warn {
-		flags = append(flags, "-fpermissive", "-w")
 	}
 	cmd := osutil.Command(compiler, flags...)
 	if file == "" {

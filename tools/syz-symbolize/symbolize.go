@@ -16,9 +16,8 @@ import (
 
 var (
 	flagOS        = flag.String("os", runtime.GOOS, "target os")
-	flagArch      = flag.String("arch", runtime.GOARCH, "target arch")
+	flagKernelSrc = flag.String("kernel_src", ".", "path to kernel sources")
 	flagKernelObj = flag.String("kernel_obj", ".", "path to kernel build/obj dir")
-	flagKernelSrc = flag.String("kernel_src", "", "path to kernel sources (defaults to kernel_obj)")
 )
 
 func main() {
@@ -29,13 +28,10 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := &mgrconfig.Config{
-		TargetOS:     *flagOS,
-		TargetArch:   *flagArch,
-		TargetVMArch: *flagArch,
-		KernelObj:    *flagKernelObj,
-		KernelSrc:    *flagKernelSrc,
+		TargetOS:  *flagOS,
+		KernelObj: *flagKernelObj,
+		KernelSrc: *flagKernelSrc,
 	}
-	cfg.CompleteKernelDirs()
 	reporter, err := report.NewReporter(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create reporter: %v\n", err)
@@ -56,7 +52,6 @@ func main() {
 	}
 	fmt.Printf("TITLE: %v\n", rep.Title)
 	fmt.Printf("CORRUPTED: %v (%v)\n", rep.Corrupted, rep.CorruptedReason)
-	fmt.Printf("MAINTAINERS: %v\n", rep.Maintainers)
 	fmt.Printf("\n")
 	os.Stdout.Write(rep.Report)
 }

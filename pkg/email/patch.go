@@ -6,35 +6,33 @@ package email
 import (
 	"bufio"
 	"fmt"
-	"regexp"
 	"strings"
 )
 
 func ParsePatch(text string) (title string, diff string, err error) {
 	s := bufio.NewScanner(strings.NewReader(text))
-	lastLine := ""
+	parsingDiff := false
 	diffStarted := false
+	lastLine := ""
 	for s.Scan() {
 		ln := s.Text()
-		if lineMatchesDiffStart(ln) {
-			diffStarted = true
-			diff += ln + "\n"
+		if strings.HasPrefix(ln, "--- a/") || strings.HasPrefix(ln, "--- /dev/null") {
+			parsingDiff = true
 			if title == "" {
 				title = lastLine
 			}
+		}
+		if parsingDiff {
+			if ln == "" || ln == "--" || ln == "-- " || ln[0] == '>' ||
+				ln[0] >= 'A' && ln[0] <= 'Z' {
+				break
+			}
+			diff += ln + "\n"
 			continue
 		}
-		if diffStarted {
-			if ln == "" || ln == "--" || ln == "-- " || ln[0] == '>' {
-				diffStarted = false
-				continue
-			}
-			if strings.HasPrefix(ln, " ") || strings.HasPrefix(ln, "+") ||
-				strings.HasPrefix(ln, "-") || strings.HasPrefix(ln, "@") ||
-				strings.HasPrefix(ln, "================") {
-				diff += ln + "\n"
-				continue
-			}
+		if strings.HasPrefix(ln, "diff --git") {
+			diffStarted = true
+			continue
 		}
 		if strings.HasPrefix(ln, "Subject: ") {
 			title = ln[len("Subject: "):]
@@ -69,20 +67,4 @@ func ParsePatch(text string) (title string, diff string, err error) {
 		return
 	}
 	return
-}
-
-func lineMatchesDiffStart(ln string) bool {
-	diffRegexps := []*regexp.Regexp{
-		regexp.MustCompile(`^(---|\+\+\+) [^\s]`),
-		regexp.MustCompile(`^diff --git`),
-		regexp.MustCompile(`^index [0-9a-f]+\.\.[0-9a-f]+`),
-		regexp.MustCompile(`^new file mode [0-9]+`),
-		regexp.MustCompile(`^Index: [^\s]`),
-	}
-	for _, re := range diffRegexps {
-		if re.MatchString(ln) {
-			return true
-		}
-	}
-	return false
 }

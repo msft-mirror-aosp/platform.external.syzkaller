@@ -18,13 +18,12 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/config"
-	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/vm/vmimpl"
 )
 
 func init() {
-	vmimpl.Register("gvisor", ctor, true)
+	vmimpl.Register("gvisor", ctor)
 }
 
 type Config struct {
@@ -56,11 +55,10 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 	if err := config.LoadData(env.Config, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse vm config: %v", err)
 	}
-	if cfg.Count < 1 || cfg.Count > 128 {
-		return nil, fmt.Errorf("invalid config param count: %v, want [1, 128]", cfg.Count)
+	if cfg.Count < 1 || cfg.Count > 1000 {
+		return nil, fmt.Errorf("invalid config param count: %v, want [1, 1000]", cfg.Count)
 	}
-	if env.Debug && cfg.Count > 1 {
-		log.Logf(0, "limiting number of VMs from %v to 1 in debug mode", cfg.Count)
+	if env.Debug {
 		cfg.Count = 1
 	}
 	if !osutil.IsExist(env.Image) {
@@ -191,8 +189,6 @@ func (inst *instance) runscCmd(add ...string) *exec.Cmd {
 		"-root", inst.rootDir,
 		"-watchdog-action=panic",
 		"-network=none",
-		"-debug",
-		"-alsologtostderr",
 	}
 	if inst.cfg.RunscArgs != "" {
 		args = append(args, strings.Split(inst.cfg.RunscArgs, " ")...)
@@ -310,8 +306,9 @@ func (inst *instance) guestProxy() (*os.File, error) {
 	}
 	hostSock := os.NewFile(uintptr(socks[0]), "host unix proxy")
 	guestSock := os.NewFile(uintptr(socks[1]), "guest unix proxy")
-	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%v", inst.port))
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%v", inst.port))
 	if err != nil {
+		conn.Close()
 		hostSock.Close()
 		guestSock.Close()
 		return nil, err
@@ -327,17 +324,14 @@ func (inst *instance) guestProxy() (*os.File, error) {
 	return guestSock, nil
 }
 
-func (inst *instance) Diagnose() ([]byte, bool) {
-	b, err := osutil.Run(time.Minute, inst.runscCmd("debug", "-stacks", inst.name))
-	if err != nil {
-		b = append(b, []byte(fmt.Sprintf("\n\nError collecting stacks: %v", err))...)
-	}
-	return b, false
+func (inst *instance) Diagnose() bool {
+	osutil.Run(time.Minute, inst.runscCmd("debug", "-stacks", inst.name))
+	return true
 }
 
 func init() {
 	if os.Getenv("SYZ_GVISOR_PROXY") != "" {
-		fmt.Fprint(os.Stderr, initStartMsg)
+		fmt.Fprintf(os.Stderr, initStartMsg)
 		select {}
 	}
 }

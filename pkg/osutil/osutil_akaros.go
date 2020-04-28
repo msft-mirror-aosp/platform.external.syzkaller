@@ -17,10 +17,6 @@ func RemoveAll(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-func SystemMemorySize() uint64 {
-	return 0
-}
-
 func prolongPipe(r, w *os.File) {
 }
 
@@ -33,7 +29,4 @@ func SandboxChown(file string) error {
 }
 
 func setPdeathsig(cmd *exec.Cmd) {
-}
-
-func killPgroup(cmd *exec.Cmd) {
 }

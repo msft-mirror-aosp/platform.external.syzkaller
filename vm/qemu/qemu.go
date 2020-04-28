@@ -24,29 +24,19 @@ const (
 )
 
 func init() {
-	vmimpl.Register("qemu", ctor, true)
+	vmimpl.Register("qemu", ctor)
 }
 
 type Config struct {
-	Count    int    `json:"count"`     // number of VMs to run in parallel
-	Qemu     string `json:"qemu"`      // qemu binary name (qemu-system-arch by default)
-	QemuArgs string `json:"qemu_args"` // additional command line arguments for qemu binary
-	// Location of the kernel for injected boot (e.g. arch/x86/boot/bzImage, optional).
-	// This is passed to qemu as the -kernel option.
-	Kernel string `json:"kernel"`
-	// Additional command line options for the booting kernel, for example `root=/dev/sda1`.
-	// Can only be specified with kernel.
-	Cmdline string `json:"cmdline"`
-	Initrd  string `json:"initrd"` // linux initial ramdisk. (optional)
-	// qemu image device.
-	// The default value "hda" is transformed to "-hda image" for qemu.
-	// The modern way of describing qemu hard disks is supported, so the value
-	// "drive index=0,media=disk,file=" is transformed to "-drive index=0,media=disk,file=image"
-	// for qemu.
-	ImageDevice string `json:"image_device"`
-	CPU         int    `json:"cpu"`      // number of VM CPUs
-	Mem         int    `json:"mem"`      // amount of VM memory in MiB
-	Snapshot    bool   `json:"snapshot"` // For building kernels without -snapshot (for pkg/build)
+	Count       int    `json:"count"`        // number of VMs to use
+	Qemu        string `json:"qemu"`         // qemu binary name (qemu-system-arch by default)
+	QemuArgs    string `json:"qemu_args"`    // additional command line arguments for qemu binary
+	Kernel      string `json:"kernel"`       // kernel for injected boot (e.g. arch/x86/boot/bzImage)
+	Cmdline     string `json:"cmdline"`      // kernel command line (can only be specified with kernel)
+	Initrd      string `json:"initrd"`       // linux initial ramdisk. (optional)
+	ImageDevice string `json:"image_device"` // qemu image device (hda by default)
+	CPU         int    `json:"cpu"`          // number of VM CPUs
+	Mem         int    `json:"mem"`          // amount of VM memory in MBs
 }
 
 type Pool struct {
@@ -77,7 +67,6 @@ type archConfig struct {
 	Qemu      string
 	QemuArgs  string
 	TargetDir string
-	NicModel  string
 	CmdLine   []string
 	// Weird mode for akaros.
 	// Currently akaros does not have support for building Go binaries.
@@ -88,15 +77,9 @@ type archConfig struct {
 var archConfigs = map[string]*archConfig{
 	"linux/amd64": {
 		Qemu:      "qemu-system-x86_64",
-		QemuArgs:  "-enable-kvm -cpu host,migratable=off",
+		QemuArgs:  "-enable-kvm",
 		TargetDir: "/",
-		// e1000e fails on recent Debian distros with:
-		// Initialization of device e1000e failed: failed to find romfile "efi-e1000e.rom
-		// But other arches don't use e1000e, e.g. arm64 uses virtio by default.
-		NicModel: ",model=e1000",
 		CmdLine: append(linuxCmdline,
-			"root=/dev/sda",
-			"console=ttyS0",
 			"kvm-intel.nested=1",
 			"kvm-intel.unrestricted_guest=1",
 			"kvm-intel.vmm_exclusive=1",
@@ -114,73 +97,58 @@ var archConfigs = map[string]*archConfig{
 	"linux/386": {
 		Qemu:      "qemu-system-i386",
 		TargetDir: "/",
-		NicModel:  ",model=e1000",
-		CmdLine: append(linuxCmdline,
-			"root=/dev/sda",
-			"console=ttyS0",
-		),
+		CmdLine:   linuxCmdline,
 	},
 	"linux/arm64": {
 		Qemu:      "qemu-system-aarch64",
-		QemuArgs:  "-machine virt,virtualization=on -cpu cortex-a57",
+		QemuArgs:  "-machine virt -cpu cortex-a57",
 		TargetDir: "/",
-		CmdLine: append(linuxCmdline,
-			"root=/dev/vda",
-			"console=ttyAMA0",
-		),
+		CmdLine:   linuxCmdline,
 	},
 	"linux/arm": {
 		Qemu:      "qemu-system-arm",
 		TargetDir: "/",
-		CmdLine: append(linuxCmdline,
-			"root=/dev/vda",
-			"console=ttyAMA0",
-		),
+		CmdLine:   linuxCmdline,
 	},
 	"linux/ppc64le": {
 		Qemu:      "qemu-system-ppc64",
 		TargetDir: "/",
-		QemuArgs:  "-enable-kvm -vga none",
 		CmdLine:   linuxCmdline,
 	},
 	"freebsd/amd64": {
 		Qemu:      "qemu-system-x86_64",
 		TargetDir: "/",
 		QemuArgs:  "-enable-kvm",
-		NicModel:  ",model=e1000",
 	},
 	"netbsd/amd64": {
 		Qemu:      "qemu-system-x86_64",
 		TargetDir: "/",
 		QemuArgs:  "-enable-kvm",
-		NicModel:  ",model=e1000",
 	},
 	"fuchsia/amd64": {
 		Qemu:      "qemu-system-x86_64",
-		QemuArgs:  "-enable-kvm -machine q35 -cpu host,migratable=off",
+		QemuArgs:  "-enable-kvm -machine q35 -cpu host",
 		TargetDir: "/tmp",
-		NicModel:  ",model=e1000",
 		CmdLine: []string{
 			"kernel.serial=legacy",
 			"kernel.halt-on-panic=true",
 		},
-		HostFuzzer: true,
 	},
 	"akaros/amd64": {
 		Qemu:       "qemu-system-x86_64",
-		QemuArgs:   "-enable-kvm -cpu host,migratable=off",
+		QemuArgs:   "-enable-kvm -cpu host",
 		TargetDir:  "/",
-		NicModel:   ",model=e1000",
 		HostFuzzer: true,
 	},
 }
 
 var linuxCmdline = []string{
+	"console=ttyS0",
 	"earlyprintk=serial",
 	"oops=panic",
 	"nmi_watchdog=panic",
 	"panic_on_warn=1",
-	"panic=1",
+	"panic=86400",
 	"ftrace_dump_on_oops=orig_cpu",
 	"rodata=n",
 	"vsyscall=native",
@@ -192,20 +160,17 @@ func ctor(env *vmimpl.Env) (vmimpl.Pool, error) {
 	archConfig := archConfigs[env.OS+"/"+env.Arch]
 	cfg := &Config{
 		Count:       1,
-		CPU:         1,
 		ImageDevice: "hda",
 		Qemu:        archConfig.Qemu,
 		QemuArgs:    archConfig.QemuArgs,
-		Snapshot:    true,
 	}
 	if err := config.LoadData(env.Config, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse qemu vm config: %v", err)
 	}
-	if cfg.Count < 1 || cfg.Count > 128 {
-		return nil, fmt.Errorf("invalid config param count: %v, want [1, 128]", cfg.Count)
+	if cfg.Count < 1 || cfg.Count > 1000 {
+		return nil, fmt.Errorf("invalid config param count: %v, want [1, 1000]", cfg.Count)
 	}
-	if env.Debug && cfg.Count > 1 {
-		log.Logf(0, "limiting number of VMs from %v to 1 in debug mode", cfg.Count)
+	if env.Debug {
 		cfg.Count = 1
 	}
 	if _, err := exec.LookPath(cfg.Qemu); err != nil {
@@ -303,7 +268,7 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (vmimpl.Insta
 		return nil, err
 	}
 
-	if err := inst.boot(); err != nil {
+	if err := inst.Boot(); err != nil {
 		return nil, err
 	}
 
@@ -327,38 +292,30 @@ func (inst *instance) Close() {
 	}
 }
 
-func (inst *instance) boot() error {
+func (inst *instance) Boot() error {
 	inst.port = vmimpl.UnusedTCPPort()
 	args := []string{
 		"-m", strconv.Itoa(inst.cfg.Mem),
 		"-smp", strconv.Itoa(inst.cfg.CPU),
-		"-net", "nic" + inst.archConfig.NicModel,
+		// e1000e fails on recent Debian distros with:
+		// Initialization of device e1000e failed: failed to find romfile "efi-e1000e.rom
+		"-net", "nic,model=e1000",
 		"-net", fmt.Sprintf("user,host=%v,hostfwd=tcp::%v-:22", hostAddr, inst.port),
 		"-display", "none",
 		"-serial", "stdio",
 		"-no-reboot",
 	}
-	if inst.cfg.QemuArgs != "" {
-		args = append(args, strings.Split(inst.cfg.QemuArgs, " ")...)
-	}
+	args = append(args, strings.Split(inst.cfg.QemuArgs, " ")...)
 	if inst.image == "9p" {
 		args = append(args,
 			"-fsdev", "local,id=fsdev0,path=/,security_model=none,readonly",
 			"-device", "virtio-9p-pci,fsdev=fsdev0,mount_tag=/dev/root",
 		)
 	} else if inst.image != "" {
-		// inst.cfg.ImageDevice can contain spaces
-		imgline := strings.Split(inst.cfg.ImageDevice, " ")
-		imgline[0] = "-" + imgline[0]
-		if strings.HasSuffix(imgline[len(imgline)-1], "file=") {
-			imgline[len(imgline)-1] = imgline[len(imgline)-1] + inst.image
-		} else {
-			imgline = append(imgline, inst.image)
-		}
-		args = append(args, imgline...)
-		if inst.cfg.Snapshot {
-			args = append(args, "-snapshot")
-		}
+		args = append(args,
+			"-"+inst.cfg.ImageDevice, inst.image,
+			"-snapshot",
+		)
 	}
 	if inst.cfg.Initrd != "" {
 		args = append(args,
@@ -374,6 +331,8 @@ func (inst *instance) boot() error {
 				"rootflags=trans=virtio,version=9p2000.L,cache=loose",
 				"init="+filepath.Join(inst.workdir, "init.sh"),
 			)
+		} else {
+			cmdline = append(cmdline, "root=/dev/sda")
 		}
 		cmdline = append(cmdline, inst.cfg.Cmdline)
 		args = append(args,
@@ -418,10 +377,10 @@ func (inst *instance) boot() error {
 		}
 	}()
 	if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute, "localhost",
-		inst.sshkey, inst.sshuser, inst.os, inst.port, inst.merger.Err); err != nil {
+		inst.sshkey, inst.sshuser, inst.os, inst.port); err != nil {
 		bootOutputStop <- true
 		<-bootOutputStop
-		return vmimpl.MakeBootError(err, bootOutput)
+		return vmimpl.BootError{Title: err.Error(), Output: bootOutput}
 	}
 	bootOutputStop <- true
 	return nil
@@ -542,12 +501,12 @@ func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command strin
 	return inst.merger.Output, errc, nil
 }
 
-func (inst *instance) Diagnose() ([]byte, bool) {
+func (inst *instance) Diagnose() bool {
 	select {
 	case inst.diagnose <- true:
 	default:
 	}
-	return nil, false
+	return false
 }
 
 // nolint: lll
